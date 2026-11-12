@@ -20,7 +20,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("preview", help="live camera view with the gaze estimate")
     p.add_argument("--seconds", type=float, help="close the window after this many seconds")
     sub.add_parser("probe", help="show 7 targets and measure how strongly each gaze signal responds")
-    sub.add_parser("calibrate", help="look at 13 targets, then move your head, to fit the gaze-to-screen map")
+    p = sub.add_parser("calibrate", help="look at 14 targets to fit the gaze-to-screen map")
+    p.add_argument("--refit", action="store_true", help="fit the latest recorded session again; needs no camera")
     sub.add_parser("accuracy", help="look at 12 targets and measure the error of the calibration")
     sub.add_parser("evaluate", help="compare all models on the recorded sessions (no camera)")
     p = sub.add_parser("bench", help="measure frame rate and latency without a window")
@@ -52,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "calibrate":
             from .calibration import run_calibrate
 
-            return run_calibrate(cfg)
+            return run_calibrate(cfg, args.refit)
         if args.command == "accuracy":
             from .accuracy import run_accuracy
 

@@ -91,6 +91,11 @@ def test_without_head_phase_only_eye_models_are_trained():
         build(simulate(calibration_targets(head_phase=False)), model="combined-linear+head")
 
 
+def test_a_recorded_head_phase_can_be_ignored():
+    cal = build(simulate(calibration_targets()), use_head=False)
+    assert len(cal.scores) == 6 and not cal.model.spec.head
+
+
 def test_head_model_removes_the_bias_of_a_moved_head():
     session = simulate(calibration_targets())
     moved = simulate(ACCURACY_TARGETS, "accuracy", seed=1, head=(3.0, -2.0, 1.5, -1.0))

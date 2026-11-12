@@ -39,7 +39,7 @@ git clone <this repo> && cd handsfree
 uv sync
 uv run handsfree fetch-models    # one-time download, SHA-256 checked
 uv run handsfree preview         # check that the green rings follow your irises
-uv run handsfree calibrate       # look at targets, then move your head; about 1 minute
+uv run handsfree calibrate       # look at 14 targets, about 30 seconds
 uv run handsfree accuracy        # look at 12 targets, get the error in px and degrees
 ```
 
@@ -61,7 +61,7 @@ uv run handsfree preview
 |---|---|
 | `handsfree preview` | Live camera view with eye overlays, enlarged eye views, the uncalibrated gaze point, gesture scores, light level and latency. |
 | `handsfree probe` | Shows 7 targets and measures how strongly each gaze signal responds, and how noisy it is. Prints numbers only. |
-| `handsfree calibrate` | Shows 14 targets, then records head movements. Fits the map from gaze signals and head pose to the screen. Compares 10 models and uses the best one. |
+| `handsfree calibrate` | Shows 14 targets and fits the map from gaze signals to the screen. Compares 6 models and uses the best one. `--refit` fits the latest recording again. |
 | `handsfree evaluate` | Compares all models on the recorded sessions. Needs no camera. |
 | `handsfree accuracy` | Shows 12 other targets and reports accuracy (offset) and precision (spread) in pixels and degrees. Appends each run to `~/.local/share/handsfree/accuracy.jsonl`. |
 | `handsfree bench [--seconds N]` | Measures frame rate and latency with no window. |
@@ -77,19 +77,20 @@ shows that the signal follows your eyes, not where you look. After
 
 ## Calibration and accuracy
 
-`handsfree calibrate` has two parts and takes about one minute:
+`handsfree calibrate` shows 14 targets and takes about 30 seconds. The first
+target is a warm-up and is not used.
 
-1. **Targets.** You look at 14 targets. The first one is a warm-up and is not used.
-2. **Head phase.** You look at one dot and move your head slowly: turn, nod,
-   lean. Your eyes and your head pose change, but your gaze point does not.
-   From this the model learns to compensate for head position and tilt.
-
-Calibration fits 10 candidate models. The eye signal is the iris position, the
+Calibration fits 6 candidate models. The eye signal is the iris position, the
 model's eye-look scores ("blendshape"), or both, with linear or quadratic
-terms. Each one exists with and without head pose. Each model gets a
-cross-check error: a group of rows is left out of the fit, and the error on
-that group is measured. The lowest error wins. To force a model, set
-`calibration.model` in the config.
+terms. Each model gets a cross-check error: one target is left out of the
+fit, and the error at that target is measured. The lowest error wins. To
+force a model, set `calibration.model` in the config.
+
+`handsfree calibrate --refit` fits the latest recording again, for example
+after a config change. It needs no camera.
+
+An experimental head phase (`calibration.head_phase = true`) adds 4 models that
+use head pose. In tests so far it made the result worse, so it is off.
 
 `handsfree accuracy` reports, for 12 other targets, the offset (accuracy), the
 spread (jitter before smoothing) and the bias (a constant shift, which shows
@@ -132,7 +133,7 @@ FrameSource ─► FaceTracker ─┬─► GazeEstimator ─► GazeMapper ─�
 | `face.py` | `FaceTracker` | `MediaPipeFaceTracker` (478 landmarks, head pose, 52 gesture scores) |
 | `gaze.py` | `GazeEstimator` | `LandmarkGazeEstimator` (iris position between the eye corners + head pose) |
 | `mapping.py` | `GazeMapper` | `UncalibratedMapper` (before calibration) |
-| `calibration.py` | `GazeMapper` | `CalibratedMapper` (ridge regression on eye signals and head pose, 10 candidate models) |
+| `calibration.py` | `GazeMapper` | `CalibratedMapper` (ridge regression on eye signals, 6 candidate models) |
 | `accuracy.py` | | Accuracy and precision report; offline model comparison |
 | `sessions.py` | | Recorded target sessions (feature numbers only) |
 | `targets.py` | | Fullscreen target sequence that records gaze features (probe, calibration, accuracy test) |

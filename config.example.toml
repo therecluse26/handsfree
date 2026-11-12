@@ -43,8 +43,10 @@ model = "auto"
 settle_s = 1.0
 # Seconds of recording for each target.
 record_s = 1.0
-# After the targets, record head movements, so the model can compensate for head position and tilt.
-head_phase = true
+# Seconds to read an on-screen instruction before its recording starts.
+prompt_read_s = 5.0
+# Experimental. After the targets, record head movements and train models that use head pose. In tests so far this made the result worse.
+head_phase = false
 
 [screen]
 # Eye-to-screen distance, used to convert pixels to degrees. 0 means: use the head tracker's estimate.

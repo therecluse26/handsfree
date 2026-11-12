@@ -4,9 +4,10 @@ The calibration session has two parts:
 
 1. Fixation targets. The user looks at 13 known points. Each target gives
    one training row: the median feature vector.
-2. Head phase. The user looks at the centre and moves the head slowly. The
-   eye signals and the head pose change, but the gaze point does not. This
-   teaches the model to compensate for head position and tilt.
+2. Head phase (experimental, off by default). The user looks at the centre
+   and moves the head slowly. The eye signals and the head pose change, but
+   the gaze point does not. The idea is that the model learns to compensate
+   for head position and tilt. In tests so far it made the result worse.
 
 Several candidate models are fitted. Each one gets a cross-check error: a
 group of rows is left out, the model is fitted on the other rows, and the
@@ -67,7 +68,7 @@ _LOOK = "Keep your eyes on the dot.\n"
 HEAD_TARGETS = [
     Target("head-turn", 0.5, 0.5, "head", 6.0, _LOOK + "Slowly turn your head a little left, then a little right."),
     Target("head-nod", 0.5, 0.5, "head", 6.0, _LOOK + "Slowly nod your head a little up, then a little down."),
-    Target("head-shift", 0.5, 0.5, "head", 6.0, _LOOK + "Slowly lean a little left and right, then closer and farther."),
+    Target("head-shift", 0.5, 0.5, "head", 6.0, _LOOK + "Keep your head upright. Slowly move it a little left and right,\nthen a little closer and farther."),
 ]
 
 FIXATION_TARGETS = [
@@ -97,7 +98,11 @@ def intro(head_phase: bool) -> str:
         "Look at the centre dot of the target until it moves.\n"
     )
     if head_phase:
-        text += "\nPart 2: look at one dot and move your head slowly.\nThe screen tells you how.\n"
+        text += (
+            "\nPart 2: look at one dot and move your head slowly.\n"
+            "The screen tells you how. You get time to read each instruction.\n"
+            "Make small movements, as when you shift in your chair.\n"
+        )
     return text + "\nSpace: start        Esc: cancel"
 
 
@@ -196,7 +201,8 @@ class Rows:
         return np.ones(len(self.x), dtype=bool) if spec.head else ~self.head
 
 
-def training_rows(session: TargetSession) -> Rows:
+def training_rows(session: TargetSession, use_head: bool = True) -> Rows:
+    """``use_head=False`` ignores a recorded head phase."""
     x, y, group, weight, head = [], [], [], [], []
     g = 0
     for t, s, times in zip(session.targets, session.samples, session.times):
@@ -209,7 +215,7 @@ def training_rows(session: TargetSession) -> Rows:
             weight.append(1.0)
             head.append(False)
             g += 1
-        elif t.kind == "head" and len(s):
+        elif t.kind == "head" and use_head and len(s):
             chunk = np.floor(times / CHUNK_S).astype(int)
             rows = [np.median(s[chunk == c], axis=0) for c in np.unique(chunk) if (chunk == c).sum() >= MIN_CHUNK_SAMPLES]
             if len(rows) < 4:
@@ -342,9 +348,9 @@ class Calibration:
             return None
 
 
-def build(session: TargetSession, model: str = "auto") -> Calibration:
+def build(session: TargetSession, model: str = "auto", use_head: bool = True) -> Calibration:
     """Fit a calibration from a recorded calibration session."""
-    rows = training_rows(session)
+    rows = training_rows(session, use_head)
     scores = rank_models(rows, session.names, session.screen_px)
     if not scores:
         raise ValueError("no model fits the recorded features")
@@ -386,20 +392,37 @@ class CalibratedMapper:
         return (min(1.0, max(0.0, float(x))), min(1.0, max(0.0, float(y))))
 
 
-def run_calibrate(cfg) -> int:
+def run_calibrate(cfg, refit: bool = False) -> int:
+    """Record a calibration session and fit it. ``refit`` fits the latest recording again, with no camera."""
     from .face import LOW_LIGHT
-    from .targets import run_target_session
+    from .sessions import list_sessions
 
     c = cfg.calibration
-    session = run_target_session(
-        cfg, "calibrate", calibration_targets(c.head_phase), intro(c.head_phase), c.settle_s, c.record_s
-    )
-    if session is None:
-        print("calibration cancelled; the stored calibration is not changed")
-        return 1
-    recorded = session.save()
+    if refit:
+        recordings = list_sessions("calibrate")
+        if not recordings:
+            print("no recorded calibration session found. Run: handsfree calibrate")
+            return 1
+        recorded = recordings[-1]
+        session = TargetSession.load(recorded)
+    else:
+        from .targets import run_target_session
+
+        session = run_target_session(
+            cfg,
+            "calibrate",
+            calibration_targets(c.head_phase),
+            intro(c.head_phase),
+            c.settle_s,
+            c.record_s,
+            prompt_read_s=c.prompt_read_s,
+        )
+        if session is None:
+            print("calibration cancelled; the stored calibration is not changed")
+            return 1
+        recorded = session.save()
     try:
-        cal = build(session, c.model)
+        cal = build(session, c.model, use_head=c.head_phase)
     except ValueError as e:
         print(f"calibration failed: {e}")
         return 1

@@ -1,4 +1,5 @@
 import os
+import time
 
 import numpy as np
 import pytest
@@ -37,7 +38,10 @@ def test_sequence_records_samples_for_each_target():
     app = QApplication.instance() or QApplication([])
     pipeline = Pipeline(EndlessSource(), FakeTracker(make_face(iris_dx=2.0)), LandmarkGazeEstimator())
     targets = [Target("a", 0.1, 0.5), Target("b", 0.9, 0.5, "head", 0.3, "Move your head.")]
-    w = TargetSequenceWindow(pipeline, targets, "intro", settle_s=0.05, record_s=0.15, autostart=True)
+    w = TargetSequenceWindow(
+        pipeline, targets, "intro", settle_s=0.05, record_s=0.15, autostart=True, prompt_read_s=0.4
+    )
+    t0 = time.monotonic()
     w.resize(800, 500)
     w.show()
     from PySide6.QtCore import QTimer
@@ -49,6 +53,7 @@ def test_sequence_records_samples_for_each_target():
     app.exec()  # returns when the window closes itself
     guard.stop()
     assert w.completed
+    assert time.monotonic() - t0 >= 0.05 + 0.15 + 0.4 + 0.3  # the prompt target waits for the read time
     assert w.feature_names == FEATURE_NAMES
     assert all(len(s) >= 5 for s in w.samples)
     assert len(w.samples[1]) > 1.4 * len(w.samples[0])  # the head target records for 0.3 s, not 0.15 s
@@ -74,13 +79,15 @@ def test_calibrate_then_accuracy_commands(tmp_path, monkeypatch, capsys):
     )
     monkeypatch.setattr(targets, "run_target_session", functools.partial(targets.run_target_session, autostart=True))
     monkeypatch.setattr(calibration, "HEAD_TARGETS", [dataclasses.replace(t, record_s=1.2) for t in calibration.HEAD_TARGETS])
-    cfg = dataclasses.replace(Config(), calibration=CalibrationConfig(settle_s=0.02, record_s=0.25))
+    cfg = dataclasses.replace(Config(), calibration=CalibrationConfig(settle_s=0.02, record_s=0.25, head_phase=True, prompt_read_s=0.1))
 
     assert accuracy.run_accuracy(cfg) == 1  # no calibration yet
     assert calibration.run_calibrate(cfg) == 0
     assert (tmp_path / "handsfree" / "calibration.json").exists()
     assert accuracy.run_accuracy(cfg) == 0
     assert accuracy.run_evaluate() == 0
+    assert calibration.run_calibrate(Config(), refit=True) == 0  # head phase off: eye-only models
+    assert not calibration.Calibration.load().model.spec.head
     out = capsys.readouterr().out
     assert "no usable calibration found" in out and "<- in use" in out and "mean offset" in out
     assert "accuracy sessions   1" in out

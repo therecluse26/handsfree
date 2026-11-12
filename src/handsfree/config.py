@@ -72,8 +72,10 @@ class CalibrationConfig:
     """Seconds to wait after a target appears, before recording starts."""
     record_s: float = 1.0
     """Seconds of recording for each target."""
-    head_phase: bool = True
-    """After the targets, record head movements, so the model can compensate for head position and tilt."""
+    prompt_read_s: float = 5.0
+    """Seconds to read an on-screen instruction before its recording starts."""
+    head_phase: bool = False
+    """Experimental. After the targets, record head movements and train models that use head pose. In tests so far this made the result worse."""
 
 
 @dataclass(frozen=True)
@@ -109,6 +111,7 @@ class Config:
         _check(self.calibration.model in models, f"calibration.model must be one of: {', '.join(models)}")
         _check(self.calibration.settle_s >= 0.2, "calibration.settle_s must be >= 0.2")
         _check(self.calibration.record_s >= 0.3, "calibration.record_s must be >= 0.3")
+        _check(self.calibration.prompt_read_s >= 0, "calibration.prompt_read_s must be >= 0")
         _check(self.screen.viewing_distance_cm >= 0, "screen.viewing_distance_cm must be >= 0")
         return self
 

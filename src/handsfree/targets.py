@@ -5,6 +5,7 @@ The signal probe, calibration and the accuracy test all use it.
 
 from __future__ import annotations
 
+import math
 import sys
 import time
 
@@ -20,8 +21,6 @@ from .preview import PipelineWorker
 from .sessions import TargetSession, now_iso
 from .types import Target
 
-PROMPT_SETTLE_FACTOR = 2.5
-"""A target with a prompt gets a longer settle time, so the user can read the prompt."""
 
 
 class TargetSequenceWindow(QWidget):
@@ -40,6 +39,7 @@ class TargetSequenceWindow(QWidget):
         settle_s: float = 1.0,
         record_s: float = 1.5,
         autostart: bool = False,
+        prompt_read_s: float = 5.0,
     ) -> None:
         super().__init__()
         self.setWindowTitle("handsfree — targets")
@@ -49,6 +49,7 @@ class TargetSequenceWindow(QWidget):
         self.intro = intro
         self.settle_s = settle_s
         self.record_s = record_s
+        self.prompt_read_s = prompt_read_s
         self.samples: list[list[np.ndarray]] = [[] for _ in targets]
         self.times: list[list[float]] = [[] for _ in targets]
         self.brightness: list[float] = []
@@ -68,7 +69,8 @@ class TargetSequenceWindow(QWidget):
     def _durations(self) -> tuple[float, float]:
         """(settle, record) seconds for the current target."""
         t = self.targets[self._index]
-        settle = self.settle_s * (PROMPT_SETTLE_FACTOR if t.prompt else 1.0)
+        # A target with a prompt waits longer, so the user can read the prompt first.
+        settle = max(self.settle_s, self.prompt_read_s) if t.prompt else self.settle_s
         return settle, (t.record_s if t.record_s is not None else self.record_s)
 
     def _next(self) -> None:
@@ -132,7 +134,7 @@ class TargetSequenceWindow(QWidget):
             box = QRectF(0, c.y() - 190, self.width(), 130)
             p.drawText(box, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom, t.prompt)
             left = max(0.0, settle_s + record_s - elapsed)
-            state = f"{left:.0f} s" if recording else "get ready"
+            state = f"recording, {left:.0f} s" if recording else f"read this first. Starts in {math.ceil(settle_s - elapsed)} s"
             p.setPen(colour)
             p.drawText(QRectF(0, c.y() + 60, self.width(), 40), Qt.AlignmentFlag.AlignHCenter, state)
         font.setPointSize(10)
@@ -165,13 +167,14 @@ def run_target_session(
     settle_s: float,
     record_s: float,
     autostart: bool = False,
+    prompt_read_s: float = 5.0,
 ) -> TargetSession | None:
     """Show the targets fullscreen. Return None if the user cancelled."""
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication(sys.argv[:1])
     pipeline = Pipeline.from_config(cfg)
-    window = TargetSequenceWindow(pipeline, targets, intro, settle_s, record_s, autostart)
+    window = TargetSequenceWindow(pipeline, targets, intro, settle_s, record_s, autostart, prompt_read_s)
     window.showFullScreen()
     app.exec()
     pipeline.close()
