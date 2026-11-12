@@ -1,0 +1,37 @@
+# handsfree config. Default location: /home/brad/.config/handsfree/config.toml
+
+[camera]
+# V4L2 device path, or a camera index such as "0".
+device = "/dev/video0"
+width = 640
+height = 480
+fps = 60
+# Pixel format. MJPG gives the highest frame rates on most webcams.
+fourcc = "MJPG"
+# Stop auto-exposure from lowering the frame rate in dim light.
+fixed_framerate = true
+
+[face]
+# Path to face_landmarker.task. Empty means the model cache (see `handsfree fetch-models`).
+model_path = ""
+# "cpu" or "gpu".
+delegate = "cpu"
+min_detection_confidence = 0.5
+min_presence_confidence = 0.5
+min_tracking_confidence = 0.5
+
+[gaze]
+# Gaze estimator. Only "landmark" exists for now.
+estimator = "landmark"
+# An eye with lid gap / eye width below this value counts as closed.
+blink_openness = 0.12
+
+[preview]
+# Show the camera image like a mirror.
+mirror = true
+# Uncalibrated view only: screen widths per eye width of horizontal iris movement.
+gain_x = 4.0
+# Uncalibrated view only: screen heights per eye width of vertical iris movement.
+gain_y = 6.0
+# Number of past gaze points drawn behind the current one.
+trail_length = 20
