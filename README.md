@@ -66,6 +66,9 @@ uv run handsfree preview
 | `handsfree accuracy` | Shows 12 other targets and reports accuracy (offset) and precision (spread) in pixels and degrees. Appends each run to `~/.local/share/handsfree/accuracy.jsonl`. |
 | `handsfree record` | Records a labelled data set for the gaze benchmark: 26 targets at 1920x1080, with eye crops (raw camera pixels) and a small face crop for each frame. Stored locally only, in `~/.local/share/handsfree/recordings/`. |
 | `handsfree benchmark [NAME ...]` | Scores gaze estimators on all recordings, with no calibration. Needs no camera. |
+| `handsfree synth setup` | Installs the Blender add-on and downloads the CC0 character assets (about 270 MB). Uses a separate Blender profile. |
+| `handsfree synth generate` | Renders labelled synthetic eye images with Blender. `--people`, `--poses`, `--jobs`, `--seed`, `--name`. |
+| `handsfree synth sheet [--camera]` | Writes one image with many eye crops of a synthetic set, for a visual check. `--camera` applies the camera simulation. |
 | `handsfree bench [--seconds N]` | Measures frame rate and latency with no window. |
 | `handsfree fetch-models` | Downloads the face model to `~/.cache/handsfree/models/`. |
 | `handsfree config [--defaults]` | Prints the active (or default) config as TOML. |
@@ -137,6 +140,43 @@ The report gives, for each recording:
 
 The `geometric` result shows that the MediaPipe iris landmark moves too
 little, mostly vertically. An eye-image model is the next estimator.
+
+## Synthetic training data
+
+The gaze model must work for everyone with no calibration. So its training
+data is synthetic: Blender renders persons with exact gaze labels, and a
+camera simulation makes the renders look like webcam frames. Real recordings
+are the test set only.
+
+Set-up needs Blender 4.2 or later:
+
+```sh
+uv run handsfree synth setup
+uv run handsfree synth generate --name trial --people 3 --poses 4 --jobs 2
+uv run handsfree synth sheet --name trial --camera
+```
+
+- **Persons** are MakeHuman characters, made with the MPFB add-on. Gender,
+  age, body, skin, eyebrows and eyelashes are random.
+- **Eyes** are anatomical models (`handsfree/blender/eye.py`): a 12 mm
+  eyeball, a refracting cornea, a procedural iris, and the angle between the
+  optical axis and the line of sight. Size, colour and pupil are random.
+- **Each image** has a random camera field of view (36° to 70°), distance
+  (350 to 900 mm), screen size, head pose, gaze target, lid position and
+  light. The auto exposure works like a camera's.
+- **Labels** are exact, in camera space (mm): the target, each eyeball
+  centre, the line of sight, the pupil position and the head pose. A check
+  that renders only the iris finds it within about 0.5 px of its label.
+- **Camera simulation** (`handsfree/camsim.py`): lens blur, noise that grows
+  with brightness and is correlated between neighbours, sharpening and 4:2:2
+  JPEG. The ranges come from measurements on real recordings.
+
+Sets are stored in `~/.local/share/handsfree/synth/`. Speed is about 0.4
+images per second on a 16-thread CPU.
+
+Licences: the MPFB add-on is GPL-3.0. handsfree runs it inside Blender as a
+separate program and does not include it. The MakeHuman system assets are
+CC0. The generated images contain no real person.
 
 ## Configuration
 

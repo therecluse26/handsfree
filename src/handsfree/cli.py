@@ -27,6 +27,19 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("evaluate", help="compare all models on the recorded sessions (no camera)")
     p = sub.add_parser("benchmark", help="score gaze estimators on the recordings, with no calibration (no camera)")
     p.add_argument("estimators", nargs="*", help="estimator names (default: all)")
+    p = sub.add_parser("synth", help="synthetic training data from Blender")
+    ssub = p.add_subparsers(dest="synth_command", required=True)
+    ssub.add_parser("setup", help="install the Blender add-on and download the CC0 character assets (about 270 MB)")
+    g = ssub.add_parser("generate", help="render labelled synthetic eye images")
+    g.add_argument("--name", default="default", help="name of the set (a folder in ~/.local/share/handsfree/synth/)")
+    g.add_argument("--people", type=int, default=25, help="persons for each job")
+    g.add_argument("--poses", type=int, default=8, help="images for each person")
+    g.add_argument("--jobs", type=int, default=4, help="Blender processes that run at the same time")
+    g.add_argument("--seed", type=int, default=0)
+    g = ssub.add_parser("sheet", help="write one image with many eye crops of a set, for a visual check")
+    g.add_argument("--name", default="default")
+    g.add_argument("--count", type=int, default=24)
+    g.add_argument("--camera", action="store_true", help="apply the camera simulation")
     p = sub.add_parser("bench", help="measure frame rate and latency without a window")
     p.add_argument("--seconds", type=float, default=5.0)
     p = sub.add_parser("config", help="print the active config as TOML")
@@ -69,6 +82,10 @@ def main(argv: list[str] | None = None) -> int:
             from .accuracy import run_evaluate
 
             return run_evaluate()
+        if args.command == "synth":
+            from .synth import run as run_synth
+
+            return run_synth(args)
         if args.command == "benchmark":
             from .benchmark import run_benchmark
 
