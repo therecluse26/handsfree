@@ -54,6 +54,12 @@ class PersonParams:
     """Angle between the optical axis and the line of sight, horizontal. The line of sight is nasal of the optical axis."""
     kappa_v_deg: float = 1.5
     """The same angle, vertical. Positive: the line of sight is above the optical axis."""
+    eyeball_offset_mm: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    """Position of the eyeballs in their sockets: (towards the nose, forwards, up). People differ in this."""
+    eye_shape: dict = field(default_factory=dict)
+    """MakeHuman eye targets and their weights, for example {"eye-height2-incr": 0.5}. Applied to both eyes."""
+    scale: float = 1.08
+    """Size of the head. 1.0 is the MakeHuman size (58.6 mm between the eyes); 1.08 gives the adult mean of 63 mm."""
 
 
 @dataclass
@@ -64,6 +70,8 @@ class Person:
     eyes: tuple[bpy.types.Object, bpy.types.Object]
     eye_rest: tuple[Vector, Vector]
     """Eyeball centres in the rig's own coordinates."""
+    socket_rest: tuple[Vector, Vector]
+    """The same points without ``eyeball_offset_mm``. The lids and eye corners belong to the socket."""
     pivot: Vector
     """Centre of head rotation in the rig's own coordinates."""
 
@@ -77,6 +85,12 @@ def build_person(p: PersonParams) -> Person:
     if "race" in p.macro:
         macro["race"] = dict(p.macro["race"])
     body = HumanService.create_human(scale=0.1, macro_detail_dict=macro)
+    import bl_ext.blender_org.mpfb as mpfb
+
+    targets = os.path.join(os.path.dirname(mpfb.__file__), "data", "targets", "eyes")
+    for name, weight in p.eye_shape.items():  # before the rig, so the eye joints follow the shape
+        for side in ("l", "r"):
+            TargetService.load_target(body, os.path.join(targets, f"{side}-{name}.target.gz"), weight=weight)
     HumanService.add_builtin_rig(body, "default")
     rig = body.parent
     HumanService.set_character_skin(os.path.join(ASSETS, "skins", p.skin, p.skin + ".mhmat"), body)
@@ -84,16 +98,21 @@ def build_person(p: PersonParams) -> Person:
         folder = kind.lower()
         HumanService.add_mhclo_asset(os.path.join(ASSETS, folder, name, name + ".mhclo"), body, asset_type=kind)
 
-    eyes, rest = [], []
+    eyes, rest, socket = [], [], []
+    nasal, forward, up = p.eyeball_offset_mm
     for side, bone, params in (("R", "eye.R", p.eyes[0]), ("L", "eye.L", p.eyes[1])):
         joint = rig.data.bones[bone].head_local.copy()
-        centre = joint + Vector((0.0, -(MAKEHUMAN_EYE_FRONT_MM - params.cornea_apex) * MM, 0.0))
+        # The head is scaled later, the eyeball is not: a larger head does not have larger eyes.
+        centre = joint + Vector((0.0, -(MAKEHUMAN_EYE_FRONT_MM - params.cornea_apex / p.scale) * MM, 0.0))
+        to_nose = 1.0 if side == "R" else -1.0  # the right eye is at -x
+        offset = Vector((nasal * to_nose, -forward, up)) * (MM / p.scale)
         obj = eyelib.create_eye(params, f"eye.{side}")
         eyes.append(obj)
-        rest.append(centre)
-    mid = (rest[0] + rest[1]) / 2
+        socket.append(centre)
+        rest.append(centre + offset)
+    mid = (socket[0] + socket[1]) / 2
     pivot = mid + Vector((0.0, 0.09, -0.04))  # about the top of the neck
-    return Person(p, rig, body, (eyes[0], eyes[1]), (rest[0], rest[1]), pivot)
+    return Person(p, rig, body, (eyes[0], eyes[1]), (rest[0], rest[1]), (socket[0], socket[1]), pivot)
 
 
 @dataclass
@@ -104,7 +123,7 @@ class Pose:
     """Positive: the face tilts up."""
     head_roll_deg: float = 0.0
     eye_mid_cam_mm: tuple[float, float, float] = (0.0, -100.0, -550.0)
-    """Midpoint between the eyeball centres, camera space."""
+    """Midpoint between the eye sockets, camera space."""
     target_cam_mm: tuple[float, float, float] = (0.0, -120.0, 0.0)
     """The point the person looks at, camera space."""
     upper_lid_follow: float = 0.75
@@ -121,8 +140,8 @@ def _head_matrix(person: Person, pose: Pose) -> Matrix:
         @ Matrix.Rotation(math.radians(pose.head_yaw_deg), 4, "Z")
         @ Matrix.Rotation(math.radians(-pose.head_pitch_deg), 4, "X")
     )
-    about_pivot = Matrix.Translation(person.pivot) @ rot @ Matrix.Translation(-person.pivot)
-    mid = about_pivot @ ((person.eye_rest[0] + person.eye_rest[1]) / 2)
+    about_pivot = Matrix.Translation(person.pivot) @ rot @ Matrix.Translation(-person.pivot) @ Matrix.Scale(person.params.scale, 4)
+    mid = about_pivot @ ((person.socket_rest[0] + person.socket_rest[1]) / 2)
     return Matrix.Translation(world_from_cam(*pose.eye_mid_cam_mm) - mid) @ about_pivot
 
 
@@ -174,6 +193,13 @@ def apply_pose(person: Person, pose: Pose) -> dict:
     _pose_lids(person, pose, pitches)
     labels["head_matrix_cam"] = [list(cam_from_world(head.to_3x3().col[i] * MM)) for i in range(3)]
     labels["head_forward_cam"] = list(cam_from_world((head_rot @ Vector((0.0, -1.0, 0.0))) * MM))
+    # The face tracker's eye point is the midpoint of the eye corners. On these characters it is
+    # 10 mm in front of the eyeball centre, 3.6 mm below it and 0.7 mm towards the nose (measured
+    # with the MediaPipe tracker on rendered faces).
+    for side, (e, rest) in enumerate(zip(labels["eyes"], person.socket_rest)):
+        nasal = 1.0 if side == 0 else -1.0
+        offset = head_rot @ Vector((0.7 * nasal * MM, -10.0 * MM, -3.6 * MM))
+        e["tracker_centre_cam_mm"] = cam_from_world(head @ rest + offset)
     labels["head_yaw_pitch_roll_deg"] = [pose.head_yaw_deg, pose.head_pitch_deg, pose.head_roll_deg]
     return labels
 
@@ -228,5 +254,7 @@ def set_border(c: CameraParams, x0: int, y0: int, width: int, height: int) -> No
     """Render only the pixel rectangle with top-left (x0, y0)."""
     r = bpy.context.scene.render
     r.use_border, r.use_crop_to_border = True, True
-    r.border_min_x, r.border_max_x = x0 / c.width, (x0 + width) / c.width
-    r.border_max_y, r.border_min_y = 1.0 - y0 / c.height, 1.0 - (y0 + height) / c.height
+    # Blender cuts border * resolution down to a whole pixel. The quarter pixel keeps
+    # rounding errors of the division from moving an edge by one pixel.
+    r.border_min_x, r.border_max_x = (x0 + 0.25) / c.width, (x0 + width + 0.25) / c.width
+    r.border_max_y, r.border_min_y = (c.height - y0 + 0.25) / c.height, (c.height - y0 - height + 0.25) / c.height

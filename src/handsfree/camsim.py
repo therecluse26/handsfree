@@ -5,7 +5,7 @@ blocks. A gaze model that learns from clean renders fails on real camera
 images. This module makes a render look like a webcam frame. It applies, in
 the order of a real camera:
 
-    lens blur -> sensor noise -> sharpening -> JPEG (4:2:2)
+    exposure and tone (Tone) -> lens blur -> sensor noise -> sharpening -> JPEG (4:2:2)
 
 The value ranges in ``CameraSim.random`` come from measurements on real
 recordings (``handsfree record``) of a Framework Laptop 16 webcam (OV2740,
@@ -94,6 +94,49 @@ class CameraSim:
         brightness = field() * sigma
         colour = np.stack([field(), np.zeros((h, w), np.float32), field()], axis=-1)  # blue and red against green
         return img + brightness[..., None] + colour * (sigma * self.chroma_noise)[..., None]
+
+
+@dataclass(frozen=True)
+class Tone:
+    """Exposure, white balance and tone curve: from linear light values to an 8-bit image.
+
+    A render stores linear light. A camera sets its exposure automatically, so the
+    image gets a target brightness, and then applies a tone curve.
+    """
+
+    brightness: float = 60.0
+    """Mean value of the 8-bit result (0-255). Measured on real eye crops in low light: 45 to 80."""
+    gamma: float = 2.2
+    white_balance: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    """Gains for blue, green, red."""
+
+    @classmethod
+    def random(cls, rng: np.random.Generator) -> Tone:
+        return cls(
+            brightness=float(rng.uniform(35.0, 150.0)),
+            gamma=float(rng.uniform(1.8, 2.6)),
+            white_balance=(float(rng.uniform(0.8, 1.2)), 1.0, float(rng.uniform(0.8, 1.2))),
+        )
+
+    def apply(self, linear: np.ndarray) -> np.ndarray:
+        """``linear``: H x W x 3 float, BGR, linear light. Returns uint8 BGR."""
+        img = np.clip(linear.astype(np.float32), 0.0, None) * np.array(self.white_balance, np.float32)
+        lo, hi = 1e-4, 1e4
+
+        def mean_at(gain: float) -> float:
+            return float((np.clip(img * gain, 0.0, 1.0) ** (1.0 / self.gamma)).mean() * 255.0)
+
+        if mean_at(hi) <= self.brightness:  # a black image stays black
+            gain = hi
+        else:
+            for _ in range(40):  # the mean grows with the gain: find the gain by bisection
+                gain = float(np.sqrt(lo * hi))
+                if mean_at(gain) < self.brightness:
+                    lo = gain
+                else:
+                    hi = gain
+        out = np.clip(img * gain, 0.0, 1.0) ** (1.0 / self.gamma)
+        return np.clip(np.rint(out * 255.0), 0, 255).astype(np.uint8)
 
 
 def _jpeg_422(img: np.ndarray, quality: int, grid_offset: tuple[int, int], cv2) -> np.ndarray:

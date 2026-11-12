@@ -27,6 +27,10 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("evaluate", help="compare all models on the recorded sessions (no camera)")
     p = sub.add_parser("benchmark", help="score gaze estimators on the recordings, with no calibration (no camera)")
     p.add_argument("estimators", nargs="*", help="estimator names (default: all)")
+    p = sub.add_parser("train", help="train the eye-image gaze model on a synthetic set (needs: uv sync --group train)")
+    p.add_argument("--set", default="default", help="name of the synthetic set; several names with commas")
+    p.add_argument("--epochs", type=int, default=30)
+    p.add_argument("--copies", type=int, default=3, help="simulated-camera versions of each render")
     p = sub.add_parser("synth", help="synthetic training data from Blender")
     ssub = p.add_subparsers(dest="synth_command", required=True)
     ssub.add_parser("setup", help="install the Blender add-on and download the CC0 character assets (about 270 MB)")
@@ -36,6 +40,7 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--poses", type=int, default=8, help="images for each person")
     g.add_argument("--jobs", type=int, default=4, help="Blender processes that run at the same time")
     g.add_argument("--seed", type=int, default=0)
+    g.add_argument("--face", action="store_true", help="also render the full face of each sample (slower)")
     g = ssub.add_parser("sheet", help="write one image with many eye crops of a set, for a visual check")
     g.add_argument("--name", default="default")
     g.add_argument("--count", type=int, default=24)
@@ -82,6 +87,10 @@ def main(argv: list[str] | None = None) -> int:
             from .accuracy import run_evaluate
 
             return run_evaluate()
+        if args.command == "train":
+            from .gazetrain import run_train
+
+            return run_train(args)
         if args.command == "synth":
             from .synth import run as run_synth
 

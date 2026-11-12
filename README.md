@@ -69,6 +69,7 @@ uv run handsfree preview
 | `handsfree synth setup` | Installs the Blender add-on and downloads the CC0 character assets (about 270 MB). Uses a separate Blender profile. |
 | `handsfree synth generate` | Renders labelled synthetic eye images with Blender. `--people`, `--poses`, `--jobs`, `--seed`, `--name`. |
 | `handsfree synth sheet [--camera]` | Writes one image with many eye crops of a synthetic set, for a visual check. `--camera` applies the camera simulation. |
+| `handsfree train --set NAME` | Trains the eye-image gaze model on a synthetic set and writes it as ONNX. Needs `uv sync --group train` (PyTorch). |
 | `handsfree bench [--seconds N]` | Measures frame rate and latency with no window. |
 | `handsfree fetch-models` | Downloads the face model to `~/.cache/handsfree/models/`. |
 | `handsfree config [--defaults]` | Prints the active (or default) config as TOML. |
@@ -163,7 +164,8 @@ uv run handsfree synth sheet --name trial --camera
   optical axis and the line of sight. Size, colour and pupil are random.
 - **Each image** has a random camera field of view (36° to 70°), distance
   (350 to 900 mm), screen size, head pose, gaze target, lid position and
-  light. The auto exposure works like a camera's.
+  light. Head size, eye shape and the eyeball position in its socket are
+  random for each person.
 - **Labels** are exact, in camera space (mm): the target, each eyeball
   centre, the line of sight, the pupil position and the head pose. A check
   that renders only the iris finds it within about 0.5 px of its label.
@@ -171,12 +173,40 @@ uv run handsfree synth sheet --name trial --camera
   with brightness and is correlated between neighbours, sharpening and 4:2:2
   JPEG. The ranges come from measurements on real recordings.
 
-Sets are stored in `~/.local/share/handsfree/synth/`. Speed is about 0.4
+The renders hold linear light values. Exposure, white balance and the tone
+curve are applied when a set is loaded, like a camera's auto exposure. So one
+render gives many different camera images.
+
+Sets are stored in `~/.local/share/handsfree/synth/`. Speed is about 1.3
 images per second on a 16-thread CPU.
 
 Licences: the MPFB add-on is GPL-3.0. handsfree runs it inside Blender as a
 separate program and does not include it. The MakeHuman system assets are
 CC0. The generated images contain no real person.
+
+## The eye-image gaze model
+
+`handsfree train` trains a small CNN on a synthetic set. Real recordings are
+never used to fit it. `handsfree benchmark` tests it on them as `eye-cnn`.
+
+1. **Normalisation** (`eyenorm.py`). Each eye is warped to the view of a
+   standard virtual camera: it looks straight at the eye, has no roll, and
+   shows the eye at 2 pixels per millimetre (96 x 64 pixels). The warp uses the
+   camera's focal length and the eye's distance. So the model sees the same
+   kind of image for every camera, distance and position in the frame.
+2. **Model** (`gazetrain.py`). The input is one grey eye image with zero mean
+   and unit variance. The output is the gaze direction as yaw and pitch in the
+   virtual camera. Right eyes are mirrored, so one model serves both eyes.
+3. **Use** (`benchmark.py`, `EyeImageModel`). The ONNX file runs in OpenCV.
+   Each eye's direction is turned back into camera space and meets the screen
+   plane. The result is the mean of the two eyes.
+
+```sh
+uv sync --group train
+uv run handsfree synth generate --name train1 --people 125 --poses 8 --jobs 4
+uv run handsfree train --set train1
+uv run handsfree benchmark
+```
 
 ## Configuration
 

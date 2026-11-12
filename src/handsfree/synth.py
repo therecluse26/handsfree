@@ -25,7 +25,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .camsim import CameraSim
+from .camsim import CameraSim, Tone
 from .recording import EYE_CROP
 from .sessions import data_dir
 
@@ -85,11 +85,12 @@ def setup() -> None:
             raise RuntimeError("the downloaded asset pack has an unexpected checksum; it was deleted")
         with zipfile.ZipFile(archive) as z:
             z.extractall(assets_dir())
+        archive.unlink()  # the extracted files are enough
     print(f"Blender profile  {blender_profile()}")
     print(f"assets           {assets_dir()}")
 
 
-def generate(name: str, people: int, poses: int, seed: int, jobs: int, samples: int = 48) -> Path:
+def generate(name: str, people: int, poses: int, seed: int, jobs: int, samples: int = 12, face: bool = False) -> Path:
     """Run Blender ``jobs`` times in parallel. Each job makes ``people`` persons with ``poses`` images each."""
     if not (assets_dir() / "skins").exists():
         raise RuntimeError("the synthetic-data assets are missing. Run: handsfree synth setup")
@@ -99,6 +100,7 @@ def generate(name: str, people: int, poses: int, seed: int, jobs: int, samples: 
     for j in range(jobs):
         cmd = [_blender(), "-b", "-P", str(SCRIPTS / "generate.py"), "--", "--out", str(out)]
         cmd += ["--people", str(people), "--poses", str(poses), "--seed", str(seed + j), "--samples", str(samples)]
+        cmd += ["--threads", str(max(1, (os.cpu_count() or 4) // jobs))] + (["--face"] if face else [])
         log = open(out / f"blender-{seed + j:04d}.log", "w")
         procs.append((subprocess.Popen(cmd, env=_blender_env(), stdout=log, stderr=subprocess.STDOUT), log))
     failed = 0
@@ -127,33 +129,44 @@ class SynthSet:
     def __len__(self) -> int:
         return len(self.labels)
 
-    def image(self, i: int) -> np.ndarray:
-        """The clean render of sample ``i``: the camera-image rectangle with both eyes, uint8 BGR."""
-        import cv2
+    def linear(self, i: int, key: str = "image") -> np.ndarray:
+        """The clean render of sample ``i`` as linear light values: float32 BGR.
 
-        img = cv2.imread(str(self.directory / self.labels[i]["image"]), cv2.IMREAD_COLOR)
-        if img is None:
-            raise FileNotFoundError(self.directory / self.labels[i]["image"])
+        ``key`` is "image" (the rectangle with both eyes) or "face_image".
+        """
+        with np.load(self.directory / self.labels[i][key]) as d:
+            return d["rgb"][..., ::-1].astype(np.float32)  # stored as RGB
+
+    def image(
+        self, i: int, tone: Tone | None = None, sim: CameraSim | None = None, rng: np.random.Generator | None = None, key: str = "image"
+    ) -> np.ndarray:
+        """Sample ``i`` as an 8-bit camera image (uint8 BGR): exposure and tone, then the camera simulation."""
+        rect = self.labels[i]["rect" if key == "image" else "face_rect"]
+        img = (tone or Tone()).apply(self.linear(i, key))
+        if sim is not None:
+            img = sim.apply(img, rng or np.random.default_rng(), grid_offset=(rect[0], rect[1]))
         return img
 
     def eye_crops(
-        self, i: int, sim: CameraSim | None = None, rng: np.random.Generator | None = None, jitter_px: float = 0.0
+        self,
+        i: int,
+        tone: Tone | None = None,
+        sim: CameraSim | None = None,
+        rng: np.random.Generator | None = None,
+        jitter_px: float = 0.0,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Two eye crops like a recording's: (2 x height x width x 3 uint8 BGR, 2 x 2 crop origins in camera pixels).
 
-        Index 0 is the eye on the image-left side (the person's right eye). ``sim`` applies
-        the camera simulation to the whole rectangle first, as a real camera does.
-        ``jitter_px`` moves each crop at random, because a real face tracker does not find
-        the same eye point as the labels.
+        Index 0 is the eye on the image-left side (the person's right eye). ``jitter_px``
+        moves each crop at random, because a real face tracker does not find the same eye
+        point as the labels.
         """
         from .recording import crop
 
         rng = rng or np.random.default_rng()
         label = self.labels[i]
-        img = self.image(i)
+        img = self.image(i, tone, sim, rng)
         x0, y0 = label["rect"][:2]
-        if sim is not None:
-            img = sim.apply(img, rng, grid_offset=(x0, y0))
         crops, origins = [], []
         for cx, cy in label["crop_centres_px"]:
             dx, dy = rng.uniform(-jitter_px, jitter_px, 2) if jitter_px else (0.0, 0.0)
@@ -166,7 +179,10 @@ class SynthSet:
 def contact_sheet(s: SynthSet, count: int, sim: bool, seed: int = 0) -> np.ndarray:
     """An image with the eye crops of the first ``count`` samples, for a visual check."""
     rng = np.random.default_rng(seed)
-    tiles = [np.hstack(list(s.eye_crops(i, CameraSim.random(rng) if sim else None, rng)[0])) for i in range(min(count, len(s)))]
+    tiles = [
+        np.hstack(list(s.eye_crops(i, Tone.random(rng) if sim else None, CameraSim.random(rng) if sim else None, rng)[0]))
+        for i in range(min(count, len(s)))
+    ]
     cols = 3
     tiles += [np.zeros_like(tiles[0])] * (-len(tiles) % cols)
     return np.vstack([np.hstack(tiles[i : i + cols]) for i in range(0, len(tiles), cols)])
@@ -178,7 +194,7 @@ def run(args) -> int:
         return 0
     if args.synth_command == "generate":
         print(f"generating {args.jobs * args.people * args.poses} samples with {args.jobs} Blender jobs …")
-        out = generate(args.name, args.people, args.poses, args.seed, args.jobs)
+        out = generate(args.name, args.people, args.poses, args.seed, args.jobs, face=args.face)
         print(f"{len(SynthSet.load(out))} samples in {out}")
         return 0
     if args.synth_command == "sheet":

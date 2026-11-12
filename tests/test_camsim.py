@@ -1,6 +1,6 @@
 import numpy as np
 
-from handsfree.camsim import CameraSim
+from handsfree.camsim import CameraSim, Tone
 
 
 def _flat(level: int, size=(128, 192)) -> np.ndarray:
@@ -63,3 +63,13 @@ def test_random_parameters_are_inside_their_ranges_and_differ():
     sims = [CameraSim.random(rng) for _ in range(50)]
     assert all(0.4 <= s.blur_sigma <= 1.4 and 40 <= s.jpeg_quality <= 90 for s in sims)
     assert len({s.jpeg_quality for s in sims}) > 10
+
+
+def test_tone_reaches_the_brightness_target_and_keeps_black_black():
+    linear = np.random.default_rng(0).uniform(0.0, 3.0, (64, 96, 3)).astype(np.float32)
+    for target in (30.0, 90.0, 150.0):
+        out = Tone(brightness=target).apply(linear)
+        assert out.dtype == np.uint8 and abs(float(out.mean()) - target) < 1.0
+    assert not Tone().apply(np.zeros((8, 8, 3), np.float32)).any()
+    warm = Tone(white_balance=(0.8, 1.0, 1.2)).apply(np.full((8, 8, 3), 0.2, np.float32))
+    assert warm[0, 0, 2] > warm[0, 0, 1] > warm[0, 0, 0]  # more red than blue

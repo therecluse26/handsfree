@@ -5,10 +5,13 @@
 The command `handsfree synth generate` runs this script with the correct Blender profile.
 
 Each sample is one render of the camera-image rectangle that holds both eyes,
-in raw camera pixels, plus one JSON line of labels in ``labels.jsonl``. All
-label positions are camera space in millimetres (see scene.py). The images are
-clean renders. The camera simulation (handsfree.camsim) is applied later, so
-one render can make many training images.
+in raw camera pixels, plus one JSON line of labels in ``labels-SEED.jsonl``.
+All label positions are camera space in millimetres (see scene.py).
+
+The images are clean renders with linear light values (.npz, float16). Exposure,
+tone and the camera simulation (handsfree.camsim) are applied later, so one
+render can make many training images. With ``--face`` each sample also gets a
+render of the full face rectangle, for checks with the face tracker.
 """
 
 from __future__ import annotations
@@ -51,6 +54,22 @@ IRIS = [
 ]
 
 
+# MakeHuman eye-shape targets: (name, the two directions). Size and position targets are left
+# out, because the anatomical eyeball does not follow them.
+EYE_SHAPES = [
+    ("eye-height1", ("incr", "decr")),
+    ("eye-height2", ("incr", "decr")),
+    ("eye-height3", ("incr", "decr")),
+    ("eye-eyefold-angle", ("up", "down")),
+    ("eye-eyefold", ("concave", "convex")),
+    ("eye-eyefold", ("up", "down")),
+    ("eye-epicanthus", ("in", "out")),
+    ("eye-corner1", ("up", "down")),
+    ("eye-corner2", ("up", "down")),
+    ("eye-bag", ("incr", "decr")),
+]
+
+
 def random_person(rng: random.Random) -> S.PersonParams:
     race = [rng.gammavariate(0.6, 1.0) for _ in range(3)]
     total = sum(race)
@@ -79,7 +98,9 @@ def random_person(rng: random.Random) -> S.PersonParams:
     eyes = tuple(
         eyelib.EyeParams(pupil_radius=pupil * rng.uniform(0.95, 1.05), iris_seed=rng.uniform(0, 100), **shared) for _ in range(2)
     )
+    shape = {f"{name}-{rng.choice(ways)}": rng.uniform(0.1, 0.7) for name, ways in EYE_SHAPES if rng.random() < 0.5}
     return S.PersonParams(
+        eye_shape=shape,
         macro={"gender": gender, "age": age, "muscle": rng.uniform(0.2, 0.8), "weight": rng.uniform(0.2, 0.8), "race": race},
         skin=skin,
         eyebrows=f"eyebrow{rng.randint(1, 12):03d}",
@@ -87,6 +108,8 @@ def random_person(rng: random.Random) -> S.PersonParams:
         eyes=eyes,
         kappa_h_deg=rng.gauss(5.0, 1.5),
         kappa_v_deg=rng.gauss(1.5, 1.0),
+        scale=rng.uniform(0.98, 1.16),
+        eyeball_offset_mm=(rng.gauss(0.0, 1.0), rng.gauss(0.0, 1.0), rng.gauss(0.0, 1.5)),
     )
 
 
@@ -102,11 +125,11 @@ def random_pose(rng: random.Random, setup: dict) -> tuple[S.Pose, dict]:
     cam, screen = setup["camera"], setup["screen"]
     z = -rng.uniform(350.0, 900.0)
     # Put the face inside the camera image.
-    u, v = rng.uniform(0.25, 0.75) * cam.width, rng.uniform(0.30, 0.75) * cam.height
+    u, v = rng.uniform(0.2, 0.8) * cam.width, rng.uniform(0.2, 0.9) * cam.height
     x, y = (u - cam.width / 2) * -z / cam.focal_px, -(v - cam.height / 2) * -z / cam.focal_px
     # A target on the screen, sometimes a little outside it.
-    sx = rng.uniform(-0.1, 1.1) * screen["width_mm"]
-    sy = rng.uniform(-0.1, 1.1) * screen["height_mm"]
+    sx = rng.uniform(-0.25, 1.25) * screen["width_mm"]
+    sy = rng.uniform(-0.25, 1.25) * screen["height_mm"]
     target = (screen["width_mm"] / 2 - sx, -(screen["camera_above_mm"] + sy), 0.0)
     # The head turns part of the way to the target, plus its own variation.
     to_target = Vector(target) - Vector((x, y, z))
@@ -114,14 +137,16 @@ def random_pose(rng: random.Random, setup: dict) -> tuple[S.Pose, dict]:
     pitch_t = math.degrees(math.atan2(to_target.y, math.hypot(to_target.x, to_target.z)))
     follow = rng.uniform(0.2, 0.9)
     pose = S.Pose(
-        head_yaw_deg=yaw_t * follow + rng.gauss(0, 7),
-        head_pitch_deg=pitch_t * follow + rng.gauss(0, 6),
-        head_roll_deg=rng.gauss(0, 4),
+        head_yaw_deg=yaw_t * follow + rng.gauss(0, 9),
+        head_pitch_deg=pitch_t * follow + rng.gauss(-3, 8),  # a laptop camera looks up at the face
+        head_roll_deg=rng.gauss(0, 5),
         eye_mid_cam_mm=(x, y, z),
         target_cam_mm=target,
-        upper_lid_follow=rng.uniform(0.6, 0.9),
-        lower_lid_follow=rng.uniform(0.2, 0.5),
-        lid_open=rng.gauss(0, 3) - (rng.uniform(4, 10) if rng.random() < 0.1 else 0),
+        # Measured with the face tracker: real lids are wider open than the MakeHuman rest
+        # shape (0.31 against 0.24 eye widths) and close less on a down gaze.
+        upper_lid_follow=rng.uniform(0.65, 0.9),
+        lower_lid_follow=rng.uniform(0.3, 0.55),
+        lid_open=rng.gauss(3.5, 4.0) - (rng.uniform(4, 10) if rng.random() < 0.1 else 0),
     )
     return pose, {"screen_xy_mm": [sx, sy]}
 
@@ -162,41 +187,35 @@ def random_light(rng: random.Random, setup: dict) -> dict:
     glow.location = S.world_from_cam(0.0, -(scr["camera_above_mm"] + scr["height_mm"] / 2), 0.0)
     glow.rotation_euler = (math.radians(-90.0), 0.0, 0.0)  # emit towards +Y, where the person sits
     info["screen_energy"] = data.energy
-    scene.view_settings.exposure = 0.0
-    info["brightness_target"] = rng.uniform(30.0, 135.0)
     return info
 
 
-def auto_exposure(target: float, path: str) -> float:
-    """Set the exposure so the mean image value is near ``target`` (0-255), as a camera's auto exposure does.
+def render_linear(path: str) -> None:
+    """Render the current border and save it as ``path`` (.npz): key "rgb", float16, linear light, top row first.
 
-    It renders a small, quick preview of the current border and measures it.
+    Blender writes OpenEXR; OpenCV wheels often cannot read it. So the EXR is converted here.
     """
+    import numpy as np
+
     scene = bpy.context.scene
-    samples, percentage = scene.cycles.samples, scene.render.resolution_percentage
-    scene.cycles.samples, scene.render.resolution_percentage = 8, 25
-    scene.render.filepath = path
-    for _ in range(2):
-        bpy.ops.render.render(write_still=True)
-        img = bpy.data.images.load(path)
-        px = list(img.pixels)
-        bpy.data.images.remove(img)
-        mean = sum(px[0::4]) * 0.2126 + sum(px[1::4]) * 0.7152 + sum(px[2::4]) * 0.0722
-        mean /= len(px) / 4  # 0..1, display values
-        linear_now, linear_want = max(mean, 0.002) ** 2.2, (target / 255.0) ** 2.2
-        scene.view_settings.exposure += max(-4.0, min(4.0, math.log2(linear_want / linear_now)))
-    scene.cycles.samples, scene.render.resolution_percentage = samples, percentage
-    os.remove(path)
-    return scene.view_settings.exposure
+    tmp = path + ".exr"
+    scene.render.filepath = tmp
+    bpy.ops.render.render(write_still=True)
+    img = bpy.data.images.load(tmp)
+    w, h = img.size
+    px = np.empty(w * h * img.channels, dtype=np.float32)
+    img.pixels.foreach_get(px)
+    bpy.data.images.remove(img)
+    os.remove(tmp)
+    rgb = px.reshape(h, w, -1)[::-1, :, :3]
+    np.savez_compressed(path, rgb=rgb.astype(np.float16))
 
 
 def eye_rectangle(cam: S.CameraParams, labels: dict) -> tuple[int, int, int, int, list]:
     """The camera-image rectangle (x0, y0, width, height) that holds both eye crops, and the crop centres."""
     centres = []
     for e in labels["eyes"]:
-        # The crop centre is on the eye's front surface, where the lid opening is.
-        front = [c + a * 10.0 for c, a in zip(e["centre_cam_mm"], labels["head_forward_cam"])]
-        centres.append(cam.project(front))
+        centres.append(cam.project(e["tracker_centre_cam_mm"]))  # where the face tracker puts the eye
     xs, ys = [c[0] for c in centres], [c[1] for c in centres]
     x0 = int(min(xs)) - EYE_CROP[0] // 2 - MARGIN
     y0 = int(min(ys)) - EYE_CROP[1] // 2 - MARGIN
@@ -206,13 +225,25 @@ def eye_rectangle(cam: S.CameraParams, labels: dict) -> tuple[int, int, int, int
     return x0, y0, min(x1, cam.width) - x0, min(y1, cam.height) - y0, centres
 
 
+def face_rectangle(cam: S.CameraParams, labels: dict) -> tuple[int, int, int, int]:
+    """The camera-image rectangle (x0, y0, width, height) that holds the face."""
+    mid = [(a + b) / 2 for a, b in zip(labels["eyes"][0]["centre_cam_mm"], labels["eyes"][1]["centre_cam_mm"])]
+    u, v = cam.project(mid)
+    k = cam.focal_px / -mid[2]  # pixels per millimetre at the face
+    x0, x1 = max(int(u - 130 * k), 0), min(int(u + 130 * k), cam.width)
+    y0, y1 = max(int(v - 140 * k), 0), min(int(v + 160 * k), cam.height)
+    return x0, y0, x1 - x0, y1 - y0
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
     ap.add_argument("--people", type=int, default=4)
     ap.add_argument("--poses", type=int, default=8)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--samples", type=int, default=48, help="Cycles samples per pixel")
+    ap.add_argument("--samples", type=int, default=12, help="Cycles samples per pixel")
+    ap.add_argument("--threads", type=int, default=4, help="CPU threads for this Blender process")
+    ap.add_argument("--face", action="store_true", help="also render the face rectangle of each sample")
     args = ap.parse_args(sys.argv[sys.argv.index("--") + 1 :])
     os.makedirs(args.out, exist_ok=True)
     t0 = time.time()
@@ -225,9 +256,15 @@ def main() -> None:
             scene.render.engine = "CYCLES"
             scene.cycles.samples = args.samples
             scene.cycles.use_denoising = True
-            scene.view_settings.view_transform = "Standard"
-            scene.render.image_settings.file_format = "PNG"
+            # Few light bounces are enough for a face. The cornea needs several transmission bounces.
+            scene.cycles.max_bounces, scene.cycles.diffuse_bounces = 4, 2
+            scene.cycles.glossy_bounces, scene.cycles.transmission_bounces = 2, 6
+            scene.render.threads_mode = "FIXED"
+            scene.render.threads = args.threads
+            scene.render.image_settings.file_format = "OPEN_EXR"
             scene.render.image_settings.color_mode = "RGB"
+            scene.render.image_settings.color_depth = "16"
+            scene.render.image_settings.exr_codec = "ZIP"
             params = random_person(rng)
             person = S.build_person(params)
             setup = random_setup(rng)
@@ -240,11 +277,14 @@ def main() -> None:
                 if w < EYE_CROP[0] or h < EYE_CROP[1]:
                     continue
                 S.set_border(setup["camera"], x0, y0, w, h)
-                name = f"s{args.seed:04d}_p{pi:04d}_{qi:02d}.png"
-                light["exposure"] = auto_exposure(light["brightness_target"], os.path.join(args.out, f"_preview-{args.seed:04d}.png"))
-                scene.render.filepath = os.path.join(args.out, name)
-                bpy.ops.render.render(write_still=True)
+                name = f"s{args.seed:04d}_p{pi:04d}_{qi:02d}.npz"
+                render_linear(os.path.join(args.out, name))
                 cam = setup["camera"]
+                if args.face:
+                    fx, fy, fw, fh = face_rectangle(cam, labels)
+                    S.set_border(cam, fx, fy, fw, fh)
+                    render_linear(os.path.join(args.out, name.replace(".npz", "_face.npz")))
+                    labels.update(face_image=name.replace(".npz", "_face.npz"), face_rect=[fx, fy, fw, fh])
                 labels.update(
                     image=name,
                     rect=[x0, y0, w, h],
@@ -256,6 +296,9 @@ def main() -> None:
                         "macro": params.macro,
                         "skin": params.skin,
                         "kappa_deg": [params.kappa_h_deg, params.kappa_v_deg],
+                        "scale": params.scale,
+                        "eye_shape": params.eye_shape,
+                        "eyeball_offset_mm": params.eyeball_offset_mm,
                         "eyes": [vars(e) for e in params.eyes],
                     },
                     lids={"upper_follow": pose.upper_lid_follow, "lower_follow": pose.lower_lid_follow, "open": pose.lid_open},

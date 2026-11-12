@@ -153,7 +153,54 @@ class GeometricEyeModel:
         return Prediction(np.mean(points, axis=0), np.mean(origins, axis=0))
 
 
-ESTIMATORS: dict[str, Estimator] = {e.name: e for e in (GeometricEyeModel(),)}
+@dataclass(frozen=True)
+class EyeImageModel:
+    """The eye-image gaze model (see gazetrain.py). It reads the eye pixels and is trained on synthetic data only."""
+
+    name: str = "eye-cnn"
+    description: str = "CNN on normalised eye images, trained on synthetic data"
+    model: str = ""
+    """Path of the ONNX file. Empty means the default path."""
+
+    def path(self):
+        from .gazetrain import model_path
+        from pathlib import Path
+
+        return Path(self.model) if self.model else model_path()
+
+    def angles(self, images: np.ndarray) -> np.ndarray:
+        """Gaze angles (N x 2 degrees) for normalised eye images (N x 64 x 96 uint8, N even: pairs of eyes)."""
+        import cv2
+
+        from . import eyenorm
+        from .gazetrain import ANGLE_SCALE
+
+        net = cv2.dnn.readNetFromONNX(str(self.path()))
+        x = eyenorm.to_model_input(images)
+        out = np.empty((len(x), 2), np.float32)
+        for i in range(0, len(x), 2):  # the model takes the two eyes of one frame
+            net.setInput(np.ascontiguousarray(x[i : i + 2]))
+            out[i : i + 2] = net.forward()
+        return out * ANGLE_SCALE
+
+    def predict(self, rec: Recording, geom: DeviceGeometry) -> Prediction:
+        from .gazedata import recording_examples
+
+        ex = recording_examples(rec, geom)
+        angles = self.angles(ex.images).astype(float)
+        angles[:, 0] *= np.where(ex.is_right, -1.0, 1.0)  # undo the mirror: only the yaw changes sign
+        hits, origins = [], []
+        for view, a in zip(ex.views, angles):
+            d = view.direction(a)
+            s = -view.eye_mm[2] / d[2] if d[2] > 1e-6 else np.nan  # the screen is the plane z = 0
+            hits.append(view.eye_mm + d * s)
+            origins.append(view.eye_mm)
+        hits = np.array(hits).reshape(len(rec), 2, 3)
+        origins = np.array(origins).reshape(len(rec), 2, 3)
+        return Prediction(geom.to_screen(hits.mean(axis=1)), origins.mean(axis=1))
+
+
+ESTIMATORS: dict[str, Estimator] = {e.name: e for e in (GeometricEyeModel(), EyeImageModel())}
 
 
 @dataclass(frozen=True)
@@ -274,6 +321,12 @@ def run_benchmark(cfg, names: list[str] | None = None) -> int:
         print(f"unknown estimator(s): {', '.join(unknown)}. Known: {', '.join(ESTIMATORS)}")
         return 1
     estimators = [ESTIMATORS[n] for n in names] if names else list(ESTIMATORS.values())
+    for est in list(estimators):
+        if isinstance(est, EyeImageModel) and not est.path().exists():
+            if names:
+                print(f"no trained model at {est.path()}. Train one with: handsfree train")
+                return 1
+            estimators.remove(est)  # not trained yet: leave it out of the default list
     recs = [Recording.load(p) for p in paths]
     print(f"{len(recs)} recordings, camera {cfg.screen.camera_above_mm:g} mm above the screen\n")
     results = run_estimators(recs, estimators, cfg.screen.camera_above_mm, cfg.camera.vertical_fov_deg)
