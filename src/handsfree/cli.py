@@ -23,7 +23,10 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("calibrate", help="look at 14 targets to fit the gaze-to-screen map")
     p.add_argument("--refit", action="store_true", help="fit the latest recorded session again; needs no camera")
     sub.add_parser("accuracy", help="look at 12 targets and measure the error of the calibration")
+    sub.add_parser("record", help="record a labelled data set: 26 targets, with eye and face images, stored locally")
     sub.add_parser("evaluate", help="compare all models on the recorded sessions (no camera)")
+    p = sub.add_parser("benchmark", help="score gaze estimators on the recordings, with no calibration (no camera)")
+    p.add_argument("estimators", nargs="*", help="estimator names (default: all)")
     p = sub.add_parser("bench", help="measure frame rate and latency without a window")
     p.add_argument("--seconds", type=float, default=5.0)
     p = sub.add_parser("config", help="print the active config as TOML")
@@ -58,10 +61,18 @@ def main(argv: list[str] | None = None) -> int:
             from .accuracy import run_accuracy
 
             return run_accuracy(cfg)
+        if args.command == "record":
+            from .recording import run_record
+
+            return run_record(cfg)
         if args.command == "evaluate":
             from .accuracy import run_evaluate
 
             return run_evaluate()
+        if args.command == "benchmark":
+            from .benchmark import run_benchmark
+
+            return run_benchmark(cfg, args.estimators)
         if args.command == "bench":
             return _bench(cfg, args.seconds)
     except (config_mod.ConfigError, RuntimeError) as e:

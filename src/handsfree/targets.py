@@ -8,6 +8,7 @@ from __future__ import annotations
 import math
 import sys
 import time
+from collections.abc import Callable
 
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
@@ -16,7 +17,7 @@ from PySide6.QtWidgets import QWidget
 
 from .config import Config
 from .face import face_brightness
-from .pipeline import Pipeline
+from .pipeline import Pipeline, PipelineResult
 from .preview import PipelineWorker
 from .sessions import TargetSession, now_iso
 from .types import Target
@@ -40,6 +41,7 @@ class TargetSequenceWindow(QWidget):
         record_s: float = 1.5,
         autostart: bool = False,
         prompt_read_s: float = 5.0,
+        on_frame: Callable[[PipelineResult, int, float], None] | None = None,
     ) -> None:
         super().__init__()
         self.setWindowTitle("handsfree — targets")
@@ -50,6 +52,8 @@ class TargetSequenceWindow(QWidget):
         self.settle_s = settle_s
         self.record_s = record_s
         self.prompt_read_s = prompt_read_s
+        self.on_frame = on_frame
+        """Called for each frame with a face inside a recording window: (result, target index, seconds)."""
         self.samples: list[list[np.ndarray]] = [[] for _ in targets]
         self.times: list[list[float]] = [[] for _ in targets]
         self.brightness: list[float] = []
@@ -90,6 +94,8 @@ class TargetSequenceWindow(QWidget):
             if r.gaze is not None and r.face is not None:
                 self.feature_names = r.gaze.names
                 since = now - self._t_target - settle
+                if active and since >= 0 and self.on_frame is not None:
+                    self.on_frame(r, self._index, since)
                 if active and since >= 0 and not r.gaze.blinking:
                     self.samples[self._index].append(r.gaze.vector)
                     self.times[self._index].append(since)
@@ -168,13 +174,14 @@ def run_target_session(
     record_s: float,
     autostart: bool = False,
     prompt_read_s: float = 5.0,
+    on_frame: Callable[[PipelineResult, int, float], None] | None = None,
 ) -> TargetSession | None:
     """Show the targets fullscreen. Return None if the user cancelled."""
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication(sys.argv[:1])
     pipeline = Pipeline.from_config(cfg)
-    window = TargetSequenceWindow(pipeline, targets, intro, settle_s, record_s, autostart, prompt_read_s)
+    window = TargetSequenceWindow(pipeline, targets, intro, settle_s, record_s, autostart, prompt_read_s, on_frame)
     window.showFullScreen()
     app.exec()
     pipeline.close()

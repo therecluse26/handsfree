@@ -55,6 +55,8 @@ class FaceObservation:
     blendshapes: dict[str, float]
     """Face-gesture scores, 0..1, keyed by name (for example ``browInnerUp``)."""
     head: HeadPose | None
+    matrix: np.ndarray | None = None
+    """4 x 4 face transform from the tracker (canonical face to camera space). ``head`` comes from it."""
 
 
 @dataclass(frozen=True, slots=True)

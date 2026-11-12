@@ -64,6 +64,8 @@ uv run handsfree preview
 | `handsfree calibrate` | Shows 14 targets and fits the map from gaze signals to the screen. Compares 6 models and uses the best one. `--refit` fits the latest recording again. |
 | `handsfree evaluate` | Compares all models on the recorded sessions. Needs no camera. |
 | `handsfree accuracy` | Shows 12 other targets and reports accuracy (offset) and precision (spread) in pixels and degrees. Appends each run to `~/.local/share/handsfree/accuracy.jsonl`. |
+| `handsfree record` | Records a labelled data set for the gaze benchmark: 26 targets at 1920x1080, with eye crops (raw camera pixels) and a small face crop for each frame. Stored locally only, in `~/.local/share/handsfree/recordings/`. |
+| `handsfree benchmark [NAME ...]` | Scores gaze estimators on all recordings, with no calibration. Needs no camera. |
 | `handsfree bench [--seconds N]` | Measures frame rate and latency with no window. |
 | `handsfree fetch-models` | Downloads the face model to `~/.cache/handsfree/models/`. |
 | `handsfree config [--defaults]` | Prints the active (or default) config as TOML. |
@@ -104,6 +106,38 @@ So models can be compared without a new recording.
 
 The calibration is in `~/.local/share/handsfree/calibration.json`.
 
+## Recordings and privacy
+
+`handsfree record` is the only command that stores images. It stores crops of
+your eyes and a small crop of your face, with the target you looked at, in
+`~/.local/share/handsfree/recordings/`. The files stay on your computer. No
+command sends them anywhere. To delete them, delete that folder.
+
+All other commands store numbers only (gaze signals, head pose), or nothing.
+
+## Zero-calibration benchmark
+
+The product must work without a per-user calibration. `handsfree benchmark`
+measures that. Each estimator gets the recorded frames and the device
+geometry only, and predicts one screen point per frame. The device geometry
+is the screen size, `screen.camera_above_mm` and `camera.vertical_fov_deg`.
+
+The report gives, for each recording:
+
+- **error**: mean distance to the target, per frame, in degrees and pixels.
+- **target**: error of the mean point for each target. Jitter is removed.
+- **jitter**: spread of the points for one target.
+- **bias**: mean offset. A constant offset in all recordings points to a
+  wrong device constant or a wrong model constant.
+- **gain**: predicted movement divided by true movement. 1.00 is correct.
+
+| Estimator | Method | Result on the first 3 recordings |
+|---|---|---|
+| `geometric` | 3D eyeball on the MediaPipe iris landmarks, population averages | 14.7° mean error; gain 0.75 horizontal, 0.39 vertical (camera field of view 44.7° vertical) |
+
+The `geometric` result shows that the MediaPipe iris landmark moves too
+little, mostly vertically. An eye-image model is the next estimator.
+
 ## Configuration
 
 The config file is `~/.config/handsfree/config.toml`. All keys are optional.
@@ -136,6 +170,7 @@ FrameSource ─► FaceTracker ─┬─► GazeEstimator ─► GazeMapper ─�
 | `calibration.py` | `GazeMapper` | `CalibratedMapper` (ridge regression on eye signals, 6 candidate models) |
 | `accuracy.py` | | Accuracy and precision report; offline model comparison |
 | `sessions.py` | | Recorded target sessions (feature numbers only) |
+| `recording.py` | | Labelled recordings with eye and face images, for the benchmark |
 | `targets.py` | | Fullscreen target sequence that records gaze features (probe, calibration, accuracy test) |
 | `probe.py` | | Signal and noise report for each gaze signal |
 | `pipeline.py` | | Joins the components and timestamps each stage |

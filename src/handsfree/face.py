@@ -78,11 +78,12 @@ class MediaPipeFaceTracker:
             if result.face_blendshapes
             else {}
         )
-        head = (
-            head_pose_from_matrix(np.asarray(result.facial_transformation_matrixes[0]))
+        matrix = (
+            np.asarray(result.facial_transformation_matrixes[0], dtype=float)
             if result.facial_transformation_matrixes
             else None
         )
+        head = head_pose_from_matrix(matrix) if matrix is not None else None
         h, w = frame.image.shape[:2]
         return FaceObservation(
             t_capture=frame.t_capture,
@@ -90,6 +91,7 @@ class MediaPipeFaceTracker:
             landmarks=landmarks,
             blendshapes=blendshapes,
             head=head,
+            matrix=matrix,
         )
 
     def close(self) -> None:

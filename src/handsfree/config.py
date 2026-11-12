@@ -31,6 +31,8 @@ class CameraConfig:
     """Pixel format. MJPG gives the highest frame rates on most webcams."""
     fixed_framerate: bool = True
     """Stop auto-exposure from lowering the frame rate in dim light."""
+    vertical_fov_deg: float = 0.0
+    """Real vertical field of view of the camera, in degrees. 0 means unknown: use the face tracker's assumption (63)."""
 
 
 @dataclass(frozen=True)
@@ -79,9 +81,22 @@ class CalibrationConfig:
 
 
 @dataclass(frozen=True)
+class RecordingConfig:
+    width: int = 1920
+    """Camera width for `handsfree record`. Recordings use the full camera resolution."""
+    height: int = 1080
+    settle_s: float = 1.0
+    """Seconds to wait after a target appears, before recording starts."""
+    record_s: float = 1.0
+    """Seconds of recording for each target."""
+
+
+@dataclass(frozen=True)
 class ScreenConfig:
     viewing_distance_cm: float = 0.0
     """Eye-to-screen distance, used to convert pixels to degrees. 0 means: use the head tracker's estimate."""
+    camera_above_mm: float = 10.0
+    """Distance from the camera lens centre down to the top edge of the screen picture."""
 
 
 @dataclass(frozen=True)
@@ -91,6 +106,7 @@ class Config:
     gaze: GazeConfig = field(default_factory=GazeConfig)
     preview: PreviewConfig = field(default_factory=PreviewConfig)
     calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
+    recording: RecordingConfig = field(default_factory=RecordingConfig)
     screen: ScreenConfig = field(default_factory=ScreenConfig)
 
     def validate(self) -> Config:
@@ -112,7 +128,12 @@ class Config:
         _check(self.calibration.settle_s >= 0.2, "calibration.settle_s must be >= 0.2")
         _check(self.calibration.record_s >= 0.3, "calibration.record_s must be >= 0.3")
         _check(self.calibration.prompt_read_s >= 0, "calibration.prompt_read_s must be >= 0")
+        _check(self.recording.width > 0 and self.recording.height > 0, "recording.width and recording.height must be > 0")
+        _check(self.recording.settle_s >= 0.2, "recording.settle_s must be >= 0.2")
+        _check(self.recording.record_s >= 0.3, "recording.record_s must be >= 0.3")
         _check(self.screen.viewing_distance_cm >= 0, "screen.viewing_distance_cm must be >= 0")
+        _check(self.screen.camera_above_mm >= 0, "screen.camera_above_mm must be >= 0")
+        _check(0 <= c.vertical_fov_deg < 170, "camera.vertical_fov_deg must be 0 (unknown) or between 0 and 170")
         return self
 
 
