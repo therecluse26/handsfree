@@ -16,6 +16,19 @@ from .models import require_face_landmarker
 from .types import FaceObservation, Frame
 
 
+def face_brightness(image: np.ndarray, landmarks: np.ndarray) -> float:
+    """Mean pixel value (0..255) of the face area. A low value means poor light."""
+    h, w = image.shape[:2]
+    x0, y0 = np.clip(landmarks[:, :2].min(axis=0) * (w, h), 0, (w, h)).astype(int)
+    x1, y1 = np.clip(landmarks[:, :2].max(axis=0) * (w, h), 0, (w, h)).astype(int)
+    crop = image[y0:y1:4, x0:x1:4]
+    return float(crop.mean()) if crop.size else 0.0
+
+
+LOW_LIGHT = 60.0
+"""Face brightness below this value gives poor iris tracking."""
+
+
 class FaceTracker(Protocol):
     def process(self, frame: Frame) -> FaceObservation | None:
         """Return the face in the frame, or None if there is no face."""

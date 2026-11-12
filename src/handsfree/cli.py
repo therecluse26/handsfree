@@ -19,6 +19,10 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("fetch-models", help="download the face model once (about 4 MB)")
     p = sub.add_parser("preview", help="live camera view with the gaze estimate")
     p.add_argument("--seconds", type=float, help="close the window after this many seconds")
+    sub.add_parser("probe", help="show 7 targets and measure how strongly each gaze signal responds")
+    sub.add_parser("calibrate", help="look at 13 targets, then move your head, to fit the gaze-to-screen map")
+    sub.add_parser("accuracy", help="look at 12 targets and measure the error of the calibration")
+    sub.add_parser("evaluate", help="compare all models on the recorded sessions (no camera)")
     p = sub.add_parser("bench", help="measure frame rate and latency without a window")
     p.add_argument("--seconds", type=float, default=5.0)
     p = sub.add_parser("config", help="print the active config as TOML")
@@ -41,6 +45,22 @@ def main(argv: list[str] | None = None) -> int:
             from .preview import run_preview
 
             return run_preview(cfg, args.seconds)
+        if args.command == "probe":
+            from .probe import run_probe
+
+            return run_probe(cfg)
+        if args.command == "calibrate":
+            from .calibration import run_calibrate
+
+            return run_calibrate(cfg)
+        if args.command == "accuracy":
+            from .accuracy import run_accuracy
+
+            return run_accuracy(cfg)
+        if args.command == "evaluate":
+            from .accuracy import run_evaluate
+
+            return run_evaluate()
         if args.command == "bench":
             return _bench(cfg, args.seconds)
     except (config_mod.ConfigError, RuntimeError) as e:

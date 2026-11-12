@@ -8,17 +8,17 @@ A hands-free mouse for Linux that uses a regular webcam.
   use is a one-time download of the face model (about 4 MB).
 - **X11 and Wayland.** Cursor control goes through a kernel virtual pointer (`uinput`).
 
-> **Status: pre-alpha, step 1 of the roadmap.** The camera, the face tracker, the
-> gaze estimator and the live preview work. The program does not move the
-> cursor or click yet.
+> **Status: pre-alpha, step 2 of the roadmap.** The camera, the face tracker, the
+> gaze estimator, the live preview, calibration and the accuracy test work.
+> The program does not move the cursor or click yet.
 
 ## Roadmap
 
 | Step | Content | State |
 |---|---|---|
 | 1 | Camera input, face tracking, gaze features, live preview, latency report | done |
-| 2 | Calibration, accuracy test screen with targets | next |
-| 3 | Cursor movement (`uinput`), fixation/jump filter, head fine-tune | |
+| 2 | Signal probe, calibration, accuracy test screen with targets | done |
+| 3 | Cursor movement (`uinput`), fixation/jump filter, head fine-tune | next |
 | 4 | Click trigger (facial gesture), click freeze, safety limits | |
 | 5 | Pause/resume shortcut, physical-input takeover helper, drift correction | |
 
@@ -38,7 +38,9 @@ drag, scroll, voice commands, snapping to UI elements, more trigger methods.
 git clone <this repo> && cd handsfree
 uv sync
 uv run handsfree fetch-models    # one-time download, SHA-256 checked
-uv run handsfree preview
+uv run handsfree preview         # check that the green rings follow your irises
+uv run handsfree calibrate       # look at targets, then move your head; about 1 minute
+uv run handsfree accuracy        # look at 12 targets, get the error in px and degrees
 ```
 
 ### NixOS
@@ -57,7 +59,11 @@ uv run handsfree preview
 
 | Command | Function |
 |---|---|
-| `handsfree preview` | Live camera view with eye overlays, the uncalibrated gaze point, gesture scores and latency. |
+| `handsfree preview` | Live camera view with eye overlays, enlarged eye views, the uncalibrated gaze point, gesture scores, light level and latency. |
+| `handsfree probe` | Shows 7 targets and measures how strongly each gaze signal responds, and how noisy it is. Prints numbers only. |
+| `handsfree calibrate` | Shows 14 targets, then records head movements. Fits the map from gaze signals and head pose to the screen. Compares 10 models and uses the best one. |
+| `handsfree evaluate` | Compares all models on the recorded sessions. Needs no camera. |
+| `handsfree accuracy` | Shows 12 other targets and reports accuracy (offset) and precision (spread) in pixels and degrees. Appends each run to `~/.local/share/handsfree/accuracy.jsonl`. |
 | `handsfree bench [--seconds N]` | Measures frame rate and latency with no window. |
 | `handsfree fetch-models` | Downloads the face model to `~/.cache/handsfree/models/`. |
 | `handsfree config [--defaults]` | Prints the active (or default) config as TOML. |
@@ -65,9 +71,37 @@ uv run handsfree preview
 Preview keys: `Q` or `Esc` quits. `C` re-centres the gaze point (look at the
 screen centre first). `M` toggles the mirror view.
 
-The gaze point in the preview is **uncalibrated**. It shows that the signal
-follows your eyes. It does not show where you look on the screen. Calibration
-is step 2.
+Before calibration, the gaze point in the preview is **uncalibrated**. It
+shows that the signal follows your eyes, not where you look. After
+`handsfree calibrate`, the preview uses the calibration.
+
+## Calibration and accuracy
+
+`handsfree calibrate` has two parts and takes about one minute:
+
+1. **Targets.** You look at 14 targets. The first one is a warm-up and is not used.
+2. **Head phase.** You look at one dot and move your head slowly: turn, nod,
+   lean. Your eyes and your head pose change, but your gaze point does not.
+   From this the model learns to compensate for head position and tilt.
+
+Calibration fits 10 candidate models. The eye signal is the iris position, the
+model's eye-look scores ("blendshape"), or both, with linear or quadratic
+terms. Each one exists with and without head pose. Each model gets a
+cross-check error: a group of rows is left out of the fit, and the error on
+that group is measured. The lowest error wins. To force a model, set
+`calibration.model` in the config.
+
+`handsfree accuracy` reports, for 12 other targets, the offset (accuracy), the
+spread (jitter before smoothing) and the bias (a constant shift, which shows
+poor head compensation).
+
+Each calibration and accuracy run is recorded in
+`~/.local/share/handsfree/sessions/`. A recording holds gaze feature numbers
+only, never camera images. `handsfree evaluate` fits every model on the latest
+calibration recording and tests it on the accuracy recordings made after it.
+So models can be compared without a new recording.
+
+The calibration is in `~/.local/share/handsfree/calibration.json`.
 
 ## Configuration
 
@@ -97,7 +131,12 @@ FrameSource ─► FaceTracker ─┬─► GazeEstimator ─► GazeMapper ─�
 | `camera.py` | `FrameSource` | `OpenCVCamera` (V4L2, MJPG) |
 | `face.py` | `FaceTracker` | `MediaPipeFaceTracker` (478 landmarks, head pose, 52 gesture scores) |
 | `gaze.py` | `GazeEstimator` | `LandmarkGazeEstimator` (iris position between the eye corners + head pose) |
-| `mapping.py` | `GazeMapper` | `UncalibratedMapper` (preview only) |
+| `mapping.py` | `GazeMapper` | `UncalibratedMapper` (before calibration) |
+| `calibration.py` | `GazeMapper` | `CalibratedMapper` (ridge regression on eye signals and head pose, 10 candidate models) |
+| `accuracy.py` | | Accuracy and precision report; offline model comparison |
+| `sessions.py` | | Recorded target sessions (feature numbers only) |
+| `targets.py` | | Fullscreen target sequence that records gaze features (probe, calibration, accuracy test) |
+| `probe.py` | | Signal and noise report for each gaze signal |
 | `pipeline.py` | | Joins the components and timestamps each stage |
 | `latency.py` | | Rolling median / p95 / max for each stage |
 | `config.py` | | TOML config with validation |

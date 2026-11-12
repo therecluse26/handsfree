@@ -39,6 +39,8 @@ IMAGE_RIGHT_EYE = EyeIndices(corner_a=362, corner_b=263, upper=386, lower=374, i
 FEATURE_NAMES = (
     "gaze_x",
     "gaze_y",
+    "bs_x",
+    "bs_y",
     "head_yaw",
     "head_pitch",
     "head_roll",
@@ -60,14 +62,31 @@ def eye_state(landmarks: np.ndarray, image_size: tuple[int, int], idx: EyeIndice
     x_axis = (b - a) / width
     y_axis = np.array([-x_axis[1], x_axis[0]])  # points down when the eye is level
     d = iris - center
+    # The four landmarks after the iris centre lie on the iris edge.
+    ring = landmarks[idx.iris + 1 : idx.iris + 5, :2] * size
     return EyeState(
         h=float(d @ x_axis) / width,
         v=float(d @ y_axis) / width,
         openness=float(abs((lower - upper) @ y_axis)) / width,
         iris_px=(float(iris[0]), float(iris[1])),
+        iris_radius_px=float(np.linalg.norm(ring - iris, axis=1).mean()),
         center_px=(float(center[0]), float(center[1])),
+        corner_a_px=(float(a[0]), float(a[1])),
+        corner_b_px=(float(b[0]), float(b[1])),
         width_px=width,
     )
+
+
+def blendshape_gaze(blendshapes: dict[str, float]) -> tuple[float, float]:
+    """A second, independent gaze signal from the model's eye-look scores.
+
+    Same sign convention as gaze_x / gaze_y. "Left" and "Right" in the score
+    names are the user's own left and right.
+    """
+    g = lambda name: blendshapes.get(name, 0.0)  # noqa: E731
+    x = (g("eyeLookInLeft") + g("eyeLookOutRight") - g("eyeLookOutLeft") - g("eyeLookInRight")) / 2.0
+    y = (g("eyeLookDownLeft") + g("eyeLookDownRight") - g("eyeLookUpLeft") - g("eyeLookUpRight")) / 2.0
+    return x, y
 
 
 class LandmarkGazeEstimator:
@@ -85,10 +104,11 @@ class LandmarkGazeEstimator:
         pose = (
             (head.yaw, head.pitch, head.roll, *head.position) if head else (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         )
+        bs_x, bs_y = blendshape_gaze(face.blendshapes)
         blinking = (left.openness + right.openness) / 2.0 < self.cfg.blink_openness
         return GazeFeatures(
             t_capture=face.t_capture,
-            vector=np.array([gaze_x, gaze_y, *pose], dtype=float),
+            vector=np.array([gaze_x, gaze_y, bs_x, bs_y, *pose], dtype=float),
             names=FEATURE_NAMES,
             eyes=(left, right),
             blinking=blinking,

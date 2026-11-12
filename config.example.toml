@@ -30,8 +30,22 @@ blink_openness = 0.12
 # Show the camera image like a mirror.
 mirror = true
 # Uncalibrated view only: screen widths per eye width of horizontal iris movement.
-gain_x = 4.0
+gain_x = 10.0
 # Uncalibrated view only: screen heights per eye width of vertical iris movement.
-gain_y = 6.0
+gain_y = 26.0
 # Number of past gaze points drawn behind the current one.
 trail_length = 20
+
+[calibration]
+# "auto" picks the model with the lowest cross-check error. Or give a model name, for example "blendshape-linear".
+model = "auto"
+# Seconds to wait after a target appears, before recording starts.
+settle_s = 1.0
+# Seconds of recording for each target.
+record_s = 1.0
+# After the targets, record head movements, so the model can compensate for head position and tilt.
+head_phase = true
+
+[screen]
+# Eye-to-screen distance, used to convert pixels to degrees. 0 means: use the head tracker's estimate.
+viewing_distance_cm = 0.0

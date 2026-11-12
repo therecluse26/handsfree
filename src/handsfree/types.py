@@ -73,7 +73,11 @@ class EyeState:
     openness: float
     """Lid gap divided by eye width. About 0.25-0.35 when open, near 0 when closed."""
     iris_px: tuple[float, float]
+    iris_radius_px: float
     center_px: tuple[float, float]
+    corner_a_px: tuple[float, float]
+    """The eye corner nearer the left edge of the un-mirrored image."""
+    corner_b_px: tuple[float, float]
     width_px: float
 
 
@@ -96,3 +100,21 @@ class GazeFeatures:
 
     def get(self, name: str) -> float:
         return float(self.vector[self.names.index(name)])
+
+
+@dataclass(frozen=True, slots=True)
+class Target:
+    """A point on the screen that the user looks at."""
+
+    name: str
+    x: float
+    """0..1 across the screen, left to right."""
+    y: float
+    """0..1 down the screen, top to bottom."""
+    kind: str = "fixation"
+    """"fixation": look at it, head still. "warmup": shown, but its samples are not used.
+    "head": look at it and move the head as the prompt says."""
+    record_s: float | None = None
+    """Recording time for this target. None means the session default."""
+    prompt: str = ""
+    """Instruction shown above the target."""

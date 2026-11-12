@@ -56,12 +56,30 @@ class GazeConfig:
 class PreviewConfig:
     mirror: bool = True
     """Show the camera image like a mirror."""
-    gain_x: float = 4.0
+    gain_x: float = 10.0
     """Uncalibrated view only: screen widths per eye width of horizontal iris movement."""
-    gain_y: float = 6.0
+    gain_y: float = 26.0
     """Uncalibrated view only: screen heights per eye width of vertical iris movement."""
     trail_length: int = 20
     """Number of past gaze points drawn behind the current one."""
+
+
+@dataclass(frozen=True)
+class CalibrationConfig:
+    model: str = "auto"
+    """"auto" picks the model with the lowest cross-check error. Or give a model name, for example "blendshape-linear"."""
+    settle_s: float = 1.0
+    """Seconds to wait after a target appears, before recording starts."""
+    record_s: float = 1.0
+    """Seconds of recording for each target."""
+    head_phase: bool = True
+    """After the targets, record head movements, so the model can compensate for head position and tilt."""
+
+
+@dataclass(frozen=True)
+class ScreenConfig:
+    viewing_distance_cm: float = 0.0
+    """Eye-to-screen distance, used to convert pixels to degrees. 0 means: use the head tracker's estimate."""
 
 
 @dataclass(frozen=True)
@@ -70,6 +88,8 @@ class Config:
     face: FaceConfig = field(default_factory=FaceConfig)
     gaze: GazeConfig = field(default_factory=GazeConfig)
     preview: PreviewConfig = field(default_factory=PreviewConfig)
+    calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
+    screen: ScreenConfig = field(default_factory=ScreenConfig)
 
     def validate(self) -> Config:
         c = self.camera
@@ -83,6 +103,13 @@ class Config:
         _check(self.gaze.estimator in ("landmark",), 'gaze.estimator must be "landmark"')
         _check(0.0 < self.gaze.blink_openness < 1.0, "gaze.blink_openness must be between 0 and 1")
         _check(self.preview.trail_length >= 0, "preview.trail_length must be >= 0")
+        from .calibration import CANDIDATES
+
+        models = ["auto", *(c.name for c in CANDIDATES)]
+        _check(self.calibration.model in models, f"calibration.model must be one of: {', '.join(models)}")
+        _check(self.calibration.settle_s >= 0.2, "calibration.settle_s must be >= 0.2")
+        _check(self.calibration.record_s >= 0.3, "calibration.record_s must be >= 0.3")
+        _check(self.screen.viewing_distance_cm >= 0, "screen.viewing_distance_cm must be >= 0")
         return self
 
 
