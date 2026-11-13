@@ -21,6 +21,7 @@ import bpy
 from mathutils import Matrix, Quaternion, Vector
 
 import eye as eyelib
+import glasses as glasseslib
 
 MM = 0.001
 ASSETS = os.path.expanduser(os.environ.get("HANDSFREE_SYNTH_ASSETS", "~/.cache/handsfree/assets/makehuman/system"))
@@ -58,6 +59,7 @@ class PersonParams:
     """Position of the eyeballs in their sockets: (towards the nose, forwards, up). People differ in this."""
     eye_shape: dict = field(default_factory=dict)
     """MakeHuman eye targets and their weights, for example {"eye-height2-incr": 0.5}. Applied to both eyes."""
+    glasses: glasseslib.GlassesParams | None = None
     scale: float = 1.08
     """Size of the head. 1.0 is the MakeHuman size (58.6 mm between the eyes); 1.08 gives the adult mean of 63 mm."""
 
@@ -74,6 +76,7 @@ class Person:
     """The same points without ``eyeball_offset_mm``. The lids and eye corners belong to the socket."""
     pivot: Vector
     """Centre of head rotation in the rig's own coordinates."""
+    glasses: bpy.types.Object | None = None
 
 
 def build_person(p: PersonParams) -> Person:
@@ -112,7 +115,8 @@ def build_person(p: PersonParams) -> Person:
         rest.append(centre + offset)
     mid = (socket[0] + socket[1]) / 2
     pivot = mid + Vector((0.0, 0.09, -0.04))  # about the top of the neck
-    return Person(p, rig, body, (eyes[0], eyes[1]), (rest[0], rest[1]), (socket[0], socket[1]), pivot)
+    glasses = glasseslib.create_glasses(p.glasses) if p.glasses else None
+    return Person(p, rig, body, (eyes[0], eyes[1]), (rest[0], rest[1]), (socket[0], socket[1]), pivot, glasses)
 
 
 @dataclass
@@ -191,6 +195,8 @@ def apply_pose(person: Person, pose: Pose) -> dict:
             }
         )
     _pose_lids(person, pose, pitches)
+    if person.glasses is not None:
+        person.glasses.matrix_world = head @ _glasses_matrix(person)
     labels["head_matrix_cam"] = [list(cam_from_world(head.to_3x3().col[i] * MM)) for i in range(3)]
     labels["head_forward_cam"] = list(cam_from_world((head_rot @ Vector((0.0, -1.0, 0.0))) * MM))
     # The face tracker's eye point is the midpoint of the eye corners. On these characters it is
@@ -202,6 +208,17 @@ def apply_pose(person: Person, pose: Pose) -> dict:
         e["tracker_centre_cam_mm"] = cam_from_world(head @ rest + offset)
     labels["head_yaw_pitch_roll_deg"] = [pose.head_yaw_deg, pose.head_pitch_deg, pose.head_roll_deg]
     return labels
+
+
+def _glasses_matrix(person: Person) -> Matrix:
+    """Place of the glasses in the rig's own coordinates. The glasses keep their real size on a scaled head."""
+    g, scale = person.params.glasses, person.params.scale
+    apex = sum((p.cornea_apex for p in person.params.eyes)) / 2
+    eyes_mid = (person.socket_rest[0] + person.socket_rest[1]) / 2
+    front_of_eyes = eyes_mid + Vector((0.0, -apex * MM / scale, 0.0))
+    thickness = person.glasses["lens_thickness_mm"]
+    origin = front_of_eyes + Vector((0.0, -(g.vertex_distance + thickness) * MM / scale, g.height_offset * MM / scale))
+    return Matrix.Translation(origin) @ Matrix.Rotation(math.radians(g.tilt_deg), 4, "X") @ Matrix.Scale(1.0 / scale, 4)
 
 
 def _pose_lids(person: Person, pose: Pose, eye_pitch_deg: list[float]) -> None:

@@ -24,6 +24,8 @@ import bmesh
 import bpy
 
 MM = 0.001
+IRIS_OPEN_SKY = 0.6
+"""The part of the surroundings that the middle of an open eye sees. The lids hide the rest."""
 
 
 @dataclass(frozen=True)
@@ -40,6 +42,12 @@ class EyeParams:
     iris_seed: float = 0.0
     sclera_colour: tuple[float, float, float] = (0.80, 0.76, 0.72)
     vein_strength: float = 0.25
+    shade: float = 1.0
+    """How much the lids, the lashes and the brow shade the eye. 0 is no shade.
+
+    A real eye lies in a hollow and under the lashes. In a camera image the white of the
+    eye is darker than the cheek. A render with plain light gives a white that is too bright.
+    """
 
     @property
     def limbus_depth(self) -> float:
@@ -194,7 +202,14 @@ def iris_material(p: EyeParams, name: str):
     mix.inputs["Factor"].default_value = 1.0
     nt.links.new(fibres, mix.inputs["A"])
     nt.links.new(radial, mix.inputs["B"])
-    nt.links.new(mix.outputs["Result"], bsdf.inputs["Base Color"])
+    # The iris is behind the cornea, so it cannot measure its own shade. It gets the shade of the open eye's centre.
+    dim = nt.nodes.new("ShaderNodeMix")
+    dim.data_type = "RGBA"
+    dim.blend_type = "MULTIPLY"
+    dim.inputs["Factor"].default_value = 1.0
+    dim.inputs["B"].default_value = (*[IRIS_OPEN_SKY ** p.shade] * 3, 1.0)
+    nt.links.new(mix.outputs["Result"], dim.inputs["A"])
+    nt.links.new(dim.outputs["Result"], bsdf.inputs["Base Color"])
     bsdf.inputs["Roughness"].default_value = 0.6
     return mat
 
@@ -231,7 +246,24 @@ def sclera_material(p: EyeParams, name: str):
     mix.inputs["Factor"].default_value = 1.0
     nt.links.new(vein_col, mix.inputs["A"])
     nt.links.new(edge, mix.inputs["B"])
-    nt.links.new(mix.outputs["Result"], bsdf.inputs["Base Color"])
+    colour = mix.outputs["Result"]
+    if p.shade > 0:
+        # Ambient occlusion: the part of the surroundings that the lids hide from each point of the eye.
+        occlusion = nt.nodes.new("ShaderNodeAmbientOcclusion")
+        occlusion.samples = 6
+        occlusion.inputs["Distance"].default_value = 14.0 * MM
+        power = nt.nodes.new("ShaderNodeMath")
+        power.operation = "POWER"
+        power.inputs[1].default_value = p.shade
+        nt.links.new(occlusion.outputs["AO"], power.inputs[0])
+        shaded = nt.nodes.new("ShaderNodeMix")
+        shaded.data_type = "RGBA"
+        shaded.blend_type = "MULTIPLY"
+        shaded.inputs["Factor"].default_value = 1.0
+        nt.links.new(colour, shaded.inputs["A"])
+        nt.links.new(power.outputs[0], shaded.inputs["B"])
+        colour = shaded.outputs["Result"]
+    nt.links.new(colour, bsdf.inputs["Base Color"])
     bsdf.inputs["Roughness"].default_value = 0.35
     for key, value in (("Coat Weight", 1.0), ("Coat Roughness", 0.04), ("Subsurface Weight", 0.15)):
         if key in bsdf.inputs:

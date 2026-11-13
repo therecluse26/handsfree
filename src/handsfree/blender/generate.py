@@ -30,6 +30,7 @@ import bpy  # noqa: E402
 from mathutils import Vector  # noqa: E402
 
 import eye as eyelib  # noqa: E402
+import glasses as glasseslib  # noqa: E402
 import scene as S  # noqa: E402
 
 EYE_CROP = (192, 128)
@@ -70,6 +71,44 @@ EYE_SHAPES = [
 ]
 
 
+GLASSES_SHARE = 0.45
+"""Part of the persons who wear glasses."""
+
+
+def random_glasses(rng: random.Random) -> glasseslib.GlassesParams:
+    # Most glasses are for short sight; some are for long sight or reading.
+    power = -abs(rng.gauss(0.0, 3.0)) - 0.25 if rng.random() < 0.75 else rng.uniform(0.5, 4.0)
+    style = rng.random()
+    if style < 0.45:  # plastic frame
+        rim, depth, colour, metallic = rng.uniform(2.5, 6.0), rng.uniform(3.0, 5.5), rng.choice([(0.01, 0.01, 0.01), (0.08, 0.04, 0.02), (0.02, 0.03, 0.08), (0.3, 0.05, 0.05), (0.25, 0.2, 0.15)]), 0.0
+    elif style < 0.9:  # thin metal frame
+        rim, depth, colour, metallic = rng.uniform(0.8, 2.0), rng.uniform(1.5, 3.0), rng.choice([(0.6, 0.6, 0.6), (0.7, 0.55, 0.3), (0.05, 0.05, 0.05), (0.3, 0.3, 0.32)]), 1.0
+    else:  # rimless
+        rim, depth, colour, metallic = 0.0, 2.0, (0.5, 0.5, 0.5), 1.0
+    width = rng.uniform(44.0, 58.0)
+    return glasseslib.GlassesParams(
+        lens_width=width,
+        lens_height=width * rng.uniform(0.55, 0.9),
+        roundness=rng.uniform(2.0, 5.0),
+        bridge=rng.uniform(14.0, 21.0),
+        power=max(power, -9.0),
+        index=rng.choice((1.5, 1.6, 1.67, 1.74)),
+        base_curve=rng.uniform(1.5, 6.0),
+        vertex_distance=rng.uniform(9.0, 17.0),
+        height_offset=-rng.uniform(0.0, 8.0),
+        tilt_deg=rng.uniform(2.0, 13.0),
+        wrap_deg=rng.uniform(0.0, 7.0),
+        rim=rim,
+        rim_depth=depth,
+        temple_height=rng.uniform(1.5, 9.0),
+        frame_colour=colour,
+        frame_metallic=metallic,
+        frame_roughness=rng.uniform(0.15, 0.6),
+        coating=rng.choice((rng.uniform(0.0, 0.4), rng.uniform(0.6, 0.97))),
+        tint=(rng.uniform(0.92, 1.0), rng.uniform(0.94, 1.0), rng.uniform(0.9, 1.0)),
+    )
+
+
 def random_person(rng: random.Random) -> S.PersonParams:
     race = [rng.gammavariate(0.6, 1.0) for _ in range(3)]
     total = sum(race)
@@ -93,6 +132,7 @@ def random_person(rng: random.Random) -> S.PersonParams:
         iris_colour=colour,
         sclera_colour=tuple(c * rng.uniform(0.85, 1.0) for c in (0.80, 0.76, 0.72)),
         vein_strength=rng.uniform(0.05, 0.6),
+        shade=rng.uniform(0.9, 3.3),
     )
     pupil = rng.uniform(1.3, 3.6)
     eyes = tuple(
@@ -110,6 +150,7 @@ def random_person(rng: random.Random) -> S.PersonParams:
         kappa_v_deg=rng.gauss(1.5, 1.0),
         scale=rng.uniform(0.98, 1.16),
         eyeball_offset_mm=(rng.gauss(0.0, 1.0), rng.gauss(0.0, 1.0), rng.gauss(0.0, 1.5)),
+        glasses=random_glasses(rng) if rng.random() < GLASSES_SHARE else None,
     )
 
 
@@ -162,8 +203,22 @@ def random_light(rng: random.Random, setup: dict) -> dict:
     ambient = 10 ** rng.uniform(-1.6, -0.3)
     tint = [rng.uniform(0.8, 1.0), rng.uniform(0.85, 1.0), rng.uniform(0.75, 1.0)]
     bg.inputs[0].default_value = (*tint, 1.0)
-    bg.inputs[1].default_value = ambient
-    info = {"ambient": ambient, "lamps": []}
+    # A room is bright above and dark below: ceiling, windows and lamps against the floor and the desk.
+    floor = rng.uniform(0.05, 0.7)
+    nt = world.node_tree
+    for node in [n for n in nt.nodes if n.name.startswith("room.")]:
+        nt.nodes.remove(node)
+    coord = nt.nodes.new("ShaderNodeTexCoord")
+    split = nt.nodes.new("ShaderNodeSeparateXYZ")
+    level = nt.nodes.new("ShaderNodeMapRange")
+    for node, name in ((coord, "room.coord"), (split, "room.split"), (level, "room.level")):
+        node.name = name
+    nt.links.new(coord.outputs["Generated"], split.inputs[0])  # for a world, this is the view direction
+    nt.links.new(split.outputs["Z"], level.inputs["Value"])
+    for key, value in (("From Min", -0.25), ("From Max", 0.35), ("To Min", ambient * floor), ("To Max", ambient)):
+        level.inputs[key].default_value = value
+    nt.links.new(level.outputs["Result"], bg.inputs[1])
+    info = {"ambient": ambient, "floor": floor, "lamps": []}
     for _ in range(rng.choice((0, 1, 1, 2, 3))):
         data = bpy.data.lights.new("lamp", "AREA")
         data.size = rng.uniform(0.1, 1.2)
@@ -299,6 +354,7 @@ def main() -> None:
                         "scale": params.scale,
                         "eye_shape": params.eye_shape,
                         "eyeball_offset_mm": params.eyeball_offset_mm,
+                        "glasses": vars(params.glasses) if params.glasses else None,
                         "eyes": [vars(e) for e in params.eyes],
                     },
                     lids={"upper_follow": pose.upper_lid_follow, "lower_follow": pose.lower_lid_follow, "open": pose.lid_open},
