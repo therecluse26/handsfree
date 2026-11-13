@@ -33,6 +33,7 @@ from .benchmark import CANONICAL_CM, EYES, MEDIAPIPE_VFOV_DEG
 from .camsim import CameraSim, Tone
 from .models import ssl_context
 from .gaze import IMAGE_LEFT_EYE, IMAGE_RIGHT_EYE, eye_state
+from .gazedata import tracker_head
 from .sessions import data_dir
 
 FFHQ_URL = "https://huggingface.co/datasets/gaunernst/ffhq-1024-wds/resolve/main/{name}"
@@ -96,15 +97,39 @@ class ReferenceEyes:
     head_pitch_deg: np.ndarray
     iris: np.ndarray
     """N x 2: the tracker's iris point from the middle of the eye corners, / eye width. x towards the nose, y down."""
+    points: np.ndarray
+    """N x 5 x 2: tracker points in the normalised image (pixels): iris centre, temple-side corner,
+    nose-side corner, upper lid, lower lid."""
+    head: np.ndarray
+    """N x 2: the head direction of each eye image as the gaze model gets it (``gazedata.tracker_head``)."""
 
     def save(self, path: Path) -> None:
-        np.savez_compressed(path, images=self.images, name=np.array(self.name), openness=self.openness,
-                            head_yaw_deg=self.head_yaw_deg, head_pitch_deg=self.head_pitch_deg, iris=self.iris)  # fmt: skip
+        np.savez_compressed(path, images=self.images, name=np.array(self.name), openness=self.openness, head_yaw_deg=self.head_yaw_deg,
+                            head_pitch_deg=self.head_pitch_deg, iris=self.iris, points=self.points, head=self.head)  # fmt: skip
 
     @classmethod
     def load(cls, path: Path) -> ReferenceEyes:
         with np.load(path) as d:
-            return cls(d["images"], d["name"].tolist(), d["openness"], d["head_yaw_deg"], d["head_pitch_deg"], d["iris"])
+            return cls(d["images"], d["name"].tolist(), d["openness"], d["head_yaw_deg"], d["head_pitch_deg"], d["iris"], d["points"], d["head"])
+
+
+@dataclass
+class Face:
+    """One face image for ``tracked_eyes``."""
+
+    name: str
+    image: np.ndarray
+    """uint8 BGR, clean and sharp. The face tracker reads this image."""
+    vfov_deg: float
+    """Vertical field of view of this image."""
+    scale: tuple[float, float] = (1.0, 1.0)
+    """Range of the random size change before the camera simulation."""
+    iris_px: np.ndarray | None = None
+    """2 x 2, optional: the true iris centres in this image (image-left eye, image-right eye).
+
+    The tracker's iris point moves too little when the eye turns far. A synthetic face has
+    exact labels, so they replace the tracker's iris points.
+    """
 
 
 def _landmarker():
@@ -151,11 +176,22 @@ def _eye_rect(landmarks: np.ndarray, size: tuple[float, float]) -> tuple[int, in
     return max(x0, 0), max(y0, 0), min(x1, int(size[0])), min(y1, int(size[1]))
 
 
-def build(limit: int | None = None, seed: int = 0, webcam: bool = True, log=print) -> ReferenceEyes:
-    """Normalised eye images of the reference photos. With ``webcam`` they get the webcam simulation.
+def eye_points(view: eyenorm.EyeView, landmarks: np.ndarray, size: tuple[float, float], idx, mirror: bool) -> np.ndarray:
+    """Tracker points of one eye in the normalised image: iris centre, temple-side corner, nose-side corner, upper lid, lower lid."""
+    temple, nose = (idx.corner_b, idx.corner_a) if mirror else (idx.corner_a, idx.corner_b)
+    px = landmarks[[idx.iris, temple, nose, idx.upper, idx.lower], :2] * np.array(size, float)
+    p = (view.warp @ np.column_stack([px, np.ones(len(px))]).T).T
+    p = p[:, :2] / p[:, 2:3]
+    if mirror:
+        p[:, 0] = eyenorm.SIZE[0] - 1 - p[:, 0]
+    return p
+
+
+def tracked_eyes(faces, seed: int = 0, webcam: bool = True, log=print) -> ReferenceEyes:
+    """Normalised eye images of face images (an iterable of ``Face``). With ``webcam`` they get the webcam simulation.
 
     A photo is sharp and clean. A webcam frame is not. Without the simulation, a classifier
-    would separate photos from synthetic webcam images by their noise alone. So each photo
+    would separate photos from synthetic webcam images by their noise alone. So each image
     goes the same way as a synthetic render: a smaller image (as a webcam at 0.4 to 0.9 m
     sees the eye), then tone, blur, noise and JPEG, and then the normalisation.
     """
@@ -163,18 +199,19 @@ def build(limit: int | None = None, seed: int = 0, webcam: bool = True, log=prin
 
     mp, landmarker = _landmarker()
     rng = np.random.default_rng(seed)
-    images, names, openness, yaw, pitch, iris = [], [], [], [], [], []
-    for n, (name, img) in enumerate(photos(limit)):
+    images, names, openness, yaw, pitch, iris, points, head = [], [], [], [], [], [], [], []
+    for n, face in enumerate(faces):
+        img = face.image
         result = landmarker.detect(mp.Image(mp.ImageFormat.SRGB, np.ascontiguousarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))))
         if (n + 1) % 500 == 0:
-            log(f"  reference photos: {n + 1}")
+            log(f"  face images: {n + 1}")
         if not result.face_landmarks or result.facial_transformation_matrixes is None or not len(result.facial_transformation_matrixes):
             continue
         landmarks = np.array([(p.x, p.y, p.z) for p in result.face_landmarks[0]], dtype=np.float32)
         matrix = np.asarray(result.facial_transformation_matrixes[0], dtype=float)
         full = (img.shape[1], img.shape[0])
-        scale = float(rng.uniform(0.3, 0.75)) if webcam else 1.0  # a portrait has about 4 px/mm, a webcam 1.2 to 3
-        small = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if webcam else img
+        scale = float(rng.uniform(*face.scale)) if webcam else 1.0
+        small = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale != 1.0 else img
         size = (full[0] * scale, full[1] * scale)
         x0, y0, x1, y1 = _eye_rect(landmarks, size)
         if x1 - x0 < 8 or y1 - y0 < 8:
@@ -183,24 +220,142 @@ def build(limit: int | None = None, seed: int = 0, webcam: bool = True, log=prin
         if webcam:
             linear = (frame.astype(np.float32) / 255.0) ** 2.2
             frame = CameraSim.random(rng).apply(Tone.random(rng).apply(linear), rng, grid_offset=(x0, y0))
-        views, states = eye_views(landmarks, matrix, size, PORTRAIT_VFOV_DEG)
+        views, states = eye_views(landmarks, matrix, size, face.vfov_deg)
         forward = matrix[:3, 2]
-        for k in (0, 1):
+        if face.iris_px is not None:
+            landmarks = landmarks.copy()
+            for idx, px in zip((IMAGE_LEFT_EYE, IMAGE_RIGHT_EYE), face.iris_px):
+                landmarks[idx.iris, :2] = np.asarray(px, float) / np.array(full, float)
+        for k, idx in enumerate((IMAGE_LEFT_EYE, IMAGE_RIGHT_EYE)):
             grey = views[k].image(frame, origin=(x0, y0))
             images.append(grey[:, ::-1] if k == 1 else grey)
-            names.append(name)
+            names.append(face.name)
             openness.append(states[k].openness)
             iris.append((states[k].h if k == 0 else -states[k].h, states[k].v))
+            points.append(eye_points(views[k], landmarks, size, idx, mirror=(k == 1)))
             yaw.append(float(np.degrees(np.arctan2(forward[0], forward[2]))))
             pitch.append(float(np.degrees(np.arcsin(np.clip(forward[1], -1.0, 1.0)))))
+            head.append(tracker_head(views[k], matrix, k == 1))
     landmarker.close()
-    return ReferenceEyes(np.stack(images), names, np.array(openness), np.array(yaw), np.array(pitch), np.array(iris))
+    return ReferenceEyes(np.stack(images), names, np.array(openness), np.array(yaw), np.array(pitch), np.array(iris), np.array(points), np.array(head))
+
+
+def build(limit: int | None = None, seed: int = 0, webcam: bool = True, log=print) -> ReferenceEyes:
+    """Normalised eye images of the reference photos. A portrait has about 4 px/mm, a webcam 1.2 to 3."""
+    faces = (Face(name, img, PORTRAIT_VFOV_DEG, (0.3, 0.75)) for name, img in photos(limit))
+    return tracked_eyes(faces, seed, webcam, log)
+
+
+def synth_faces(name: str, seed: int = 0) -> ReferenceEyes:
+    """The same for a synthetic set that has face renders (``handsfree synth generate --face``).
+
+    The face tracker finds the eyes, as in a photo. So synthetic and real eyes go the same way.
+    """
+    from .synth import SynthSet, synth_dir
+
+    s = SynthSet.load(synth_dir() / name)
+
+    def faces():
+        for i, label in enumerate(s.labels):
+            if "face_image" not in label:
+                continue
+            img = s.image(i, Tone(brightness=95.0), key="face_image")
+            vfov = 2 * np.degrees(np.arctan(img.shape[0] / 2 / label["camera"]["focal_px"]))  # the render is a part of the camera image
+            cam, (x0, y0) = label["camera"], label["face_rect"][:2]
+            iris = []
+            for eye in label["eyes"]:  # the first one is the person's right eye: the image-left eye
+                x, y, z = eye["pupil_cam_mm"]
+                iris.append((cam["width"] / 2 + cam["focal_px"] * x / -z - x0, cam["height"] / 2 - cam["focal_px"] * y / -z - y0))
+            yield Face(label["face_image"], img, float(vfov), iris_px=np.array(iris))
+
+    return tracked_eyes(faces(), seed, log=lambda *a: None)
+
+
+def recording_eyes(rec, geom, step: int = 4) -> ReferenceEyes:
+    """The same for a recording (``handsfree record``): its eye images with the tracker points."""
+    from .gazedata import recording_examples
+
+    f = rec.frames
+    size = tuple(rec.meta["image_size"])
+    indices = range(0, len(rec), step)
+    ex = recording_examples(rec, geom, indices=indices)
+    points, iris, openness = [], [], []
+    for n, i in enumerate(indices):
+        for k, idx in enumerate((IMAGE_LEFT_EYE, IMAGE_RIGHT_EYE)):
+            state = eye_state(f["landmarks"][i], size, idx)
+            points.append(eye_points(ex.views[2 * n + k], f["landmarks"][i], size, idx, mirror=(k == 1)))
+            iris.append((state.h if k == 0 else -state.h, state.v))
+            openness.append(state.openness)
+    zeros = np.zeros(len(points))
+    return ReferenceEyes(ex.images, [str(g) for g in ex.group], np.array(openness), zeros, zeros, np.array(iris), np.array(points), ex.head)
+
+
+TONE_PARTS = ("iris", "white, temple side", "white, nose side", "corner, temple side", "corner, nose side", "lash line", "upper lid skin", "lower lid edge")
+
+
+def tones(ref: ReferenceEyes) -> np.ndarray:
+    """Brightness of parts of each eye, divided by the brightness of the skin below the eye (N x 8, see TONE_PARTS).
+
+    The parts are found with the tracker points. The values are grey levels of the camera image.
+    """
+    yy, xx = np.mgrid[0 : eyenorm.SIZE[1], 0 : eyenorm.SIZE[0]]
+    out = np.full((len(ref.images), len(TONE_PARTS)), np.nan)
+    for n, (img, p) in enumerate(zip(ref.images, ref.points)):
+        iris, temple, nose, upper, lower = p
+        width = float(np.linalg.norm(nose - temple))
+        if not 20.0 < width < 90.0:
+            continue
+        u = (nose - temple) / width  # along the eye, towards the nose
+        d = np.array([-u[1], u[0]]) * (1.0 if u[0] > 0 else -1.0)  # down
+        radius = 0.21 * width  # the iris is 0.43 of the eye width
+
+        def level(centre, r: float) -> float:
+            mask = (xx - centre[0]) ** 2 + (yy - centre[1]) ** 2 <= r * r
+            return float(img[mask].mean()) if mask.any() else np.nan
+
+        def white(corner) -> np.ndarray:
+            gap = float(np.linalg.norm(corner - iris)) - radius
+            return iris + (corner - iris) / np.linalg.norm(corner - iris) * (radius + 0.45 * gap)
+
+        skin = level(iris + d * 0.55 * width, 4.0)
+        if not skin > 1.0:
+            continue
+        parts = (
+            level(iris, 0.45 * radius), level(white(temple), 1.5), level(white(nose), 1.5),
+            level(temple + u * 1.5, 1.5), level(nose - u * 1.5, 1.5), level(upper, 1.5), level(upper - d * 0.12 * width, 2.0),
+            level(lower, 1.5),
+        )  # fmt: skip
+        out[n] = np.array(parts) / skin
+    return out
+
+
+def format_tones(groups: dict[str, ReferenceEyes]) -> str:
+    lines = [
+        "Brightness of parts of the eye / brightness of the skin below the eye. Median of all eyes;",
+        "in brackets the middle 68% for the iris and the whites.",
+        "",
+        f"{'group':26s} {'eyes':>6s} " + " ".join(f"{part[:19]:>19s}" for part in TONE_PARTS),
+    ]
+    for title, ref in groups.items():
+        t = tones(ref)
+        t = t[np.isfinite(t).all(axis=1)]
+        if len(t) < 10:
+            continue
+        cells = []
+        for j in range(t.shape[1]):
+            lo, hi = np.percentile(t[:, j], [16, 84])
+            cells.append(f"{np.median(t[:, j]):.2f} ({lo:.2f}-{hi:.2f})" if j < 3 else f"{np.median(t[:, j]):.2f}")
+        lines.append(f"{title:26s} {len(t):6d} " + " ".join(f"{c:>19s}" for c in cells))
+    return "\n".join(lines)
 
 
 def cached(limit: int | None = None, log=print) -> ReferenceEyes:
     path = reference_dir() / f"eyes-{limit or 'all'}.npz"
     if path.exists():
-        return ReferenceEyes.load(path)
+        with np.load(path) as d:
+            current = "head" in d.files  # a file from before the head direction is built again
+        if current:
+            return ReferenceEyes.load(path)
     ref = build(limit, log=log)
     ref.save(path)
     return ref
@@ -247,7 +402,7 @@ def portrait_gaze(ref: ReferenceEyes, model: str = "") -> np.ndarray:
     """
     from .benchmark import EyeImageModel
 
-    return EyeImageModel(model=model).angles(ref.images).astype(float).reshape(-1, 2, 2)
+    return EyeImageModel(model=model).angles(ref.images, ref.head).astype(float).reshape(-1, 2, 2)
 
 
 def person_gaze(eyes: np.ndarray) -> np.ndarray:
@@ -373,7 +528,27 @@ def realism(real: np.ndarray, real_group: np.ndarray, synth: np.ndarray, synth_g
     return out
 
 
+def _subset(ref: ReferenceEyes, mask: np.ndarray) -> ReferenceEyes:
+    name = [n for n, m in zip(ref.name, mask) if m]
+    return ReferenceEyes(ref.images[mask], name, ref.openness[mask], ref.head_yaw_deg[mask], ref.head_pitch_deg[mask], ref.iris[mask], ref.points[mask], ref.head[mask])
+
+
 def run(args) -> int:
+    if args.reference_command == "fetch" and args.labelled:
+        from . import labelled
+
+        labelled.fetch()
+        print(f"labelled set in {labelled.labelled_dir()}")
+        return 0
+    if args.reference_command == "labelled":
+        from . import labelled
+
+        if not labelled.archive().exists():
+            print("no labelled set. Download it with: handsfree reference fetch --labelled", file=sys.stderr)
+            return 1
+        lab = labelled.cached()
+        print(labelled.format_gaze(lab, labelled.predict(lab, args.model)))
+        return 0
     if args.reference_command == "fetch":
         fetch()
         print(f"photo files in {reference_dir()}")
@@ -385,6 +560,22 @@ def run(args) -> int:
     if args.reference_command == "gaze":
         print(f"{len(ref.images) // 2} photos with a face")
         print(format_portrait_gaze(ref, portrait_gaze(ref, args.model), glasses_labels(ref.name)))
+        return 0
+    if args.reference_command == "tone":
+        from . import config as config_mod
+        from .benchmark import DeviceGeometry
+        from .recording import Recording, list_recordings
+
+        label = np.array([glasses_labels(ref.name).get(n, "unknown") for n in ref.name])
+        groups = {"photos, no glasses": _subset(ref, label == "NoGlasses"), "photos, glasses": _subset(ref, label == "ReadingGlasses")}
+        cfg = config_mod.load(None)
+        for path in list_recordings():
+            rec = Recording.load(path)
+            geom = DeviceGeometry.for_recording(rec, cfg.screen.camera_above_mm, cfg.camera.vertical_fov_deg)
+            groups[path.name] = recording_eyes(rec, geom)
+        for name in args.set or []:
+            groups[f"synthetic {name}"] = synth_faces(name)
+        print(format_tones(groups))
         return 0
     if args.reference_command == "realism":
         from .gazetrain import build_examples

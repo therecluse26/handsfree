@@ -31,6 +31,27 @@ def test_angular_error():
     assert angular_error_deg(a, b) == pytest.approx([0.0, 10.0, 30.0], abs=1e-6)
 
 
+def test_a_model_with_the_head_direction_runs_the_same_in_opencv(tmp_path):
+    import json
+
+    from handsfree.benchmark import EyeImageModel
+    from handsfree.gazetrain import export
+
+    torch.manual_seed(0)
+    model = make_model(head=True)
+    rng = np.random.default_rng(0)
+    images = rng.integers(0, 255, (4, eyenorm.SIZE[1], eyenorm.SIZE[0]), dtype=np.uint8)
+    head = rng.uniform(-20, 20, (4, 2))
+    expected = predict(model, images, window=None, head=head)
+    assert np.abs(expected - predict(model, images, window=None, head=head + 15.0)).max() > 1e-3  # the head direction changes the answer
+    export(model, tmp_path / "h.onnx")
+    (tmp_path / "h.json").write_text(json.dumps({"window": None, "head": True}))
+    estimator = EyeImageModel(model=str(tmp_path / "h.onnx"))
+    assert estimator.angles(images, head) == pytest.approx(expected, abs=1e-3)
+    with pytest.raises(RuntimeError, match="head direction"):
+        estimator.angles(images)
+
+
 def test_the_pitch_can_come_from_a_second_model(tmp_path):
     import json
 
@@ -49,3 +70,7 @@ def test_the_pitch_can_come_from_a_second_model(tmp_path):
     (tmp_path / "a.json").write_text(json.dumps({"window": list(eyenorm.WINDOW), "pitch_from": "b.onnx"}))
     pair = EyeImageModel(model=str(tmp_path / "a.onnx")).angles(images)
     assert pair == pytest.approx(np.tile([1.0 * ANGLE_SCALE, 4.0 * ANGLE_SCALE], (4, 1)), abs=1e-3)
+    # An ensemble: the yaw is the mean of the "yaw" models, the pitch the mean of the "pitch" models.
+    (tmp_path / "a.json").write_text(json.dumps({"window": list(eyenorm.WINDOW), "ensemble": {"yaw": ["a.onnx", "b.onnx"], "pitch": ["b.onnx"]}}))
+    mean = EyeImageModel(model=str(tmp_path / "a.onnx")).angles(images)
+    assert mean == pytest.approx(np.tile([2.0 * ANGLE_SCALE, 4.0 * ANGLE_SCALE], (4, 1)), abs=1e-3)

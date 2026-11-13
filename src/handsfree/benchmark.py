@@ -168,23 +168,32 @@ class EyeImageModel:
 
         return Path(self.model) if self.model else model_path()
 
-    def angles(self, images: np.ndarray) -> np.ndarray:
+    def angles(self, images: np.ndarray, head: np.ndarray | None = None) -> np.ndarray:
         """Gaze angles (N x 2 degrees) for normalised eye images (N x 64 x 96 uint8, N even: pairs of eyes).
 
-        A model's .json file can name a second model for the pitch ("pitch_from"). Then the
-        yaw comes from this model and the pitch from the second one.
+        ``head`` is the head direction of each image (N x 2 degrees, gazedata). A model needs it
+        when its .json file has "head": true.
+
+        The model's .json file can name more models in the same folder:
+        "ensemble": {"yaw": [files], "pitch": [files]} gives the yaw as the mean of the first
+        list and the pitch as the mean of the second. "pitch_from" names one model for the pitch.
+        With neither, this model gives both angles.
         """
-        out = _run_eye_model(self.path(), images)
-        other = _model_info(self.path()).get("pitch_from")
-        if other and (self.path().parent / other).exists():
-            out[:, 1] = _run_eye_model(self.path().parent / other, images)[:, 1]
-        return out
+        info, folder = _model_info(self.path()), self.path().parent
+        ensemble = info.get("ensemble") or {}
+        yaw = [folder / name for name in ensemble.get("yaw", [])] or [self.path()]
+        pitch = [folder / name for name in ensemble.get("pitch", [])]
+        if not pitch:
+            other = info.get("pitch_from")
+            pitch = [folder / other] if other and (folder / other).exists() else [self.path()]
+        out = {path: _run_eye_model(path, images, head) for path in dict.fromkeys(yaw + pitch)}
+        return np.stack([np.mean([out[p][:, 0] for p in yaw], axis=0), np.mean([out[p][:, 1] for p in pitch], axis=0)], axis=1)
 
     def predict(self, rec: Recording, geom: DeviceGeometry) -> Prediction:
         from .gazedata import recording_examples
 
         ex = recording_examples(rec, geom)
-        angles = self.angles(ex.images).astype(float)
+        angles = self.angles(ex.images, ex.head).astype(float)
         angles[:, 0] *= np.where(ex.is_right, -1.0, 1.0)  # undo the mirror: only the yaw changes sign
         hits, origins = [], []
         for view, a in zip(ex.views, angles):
@@ -205,19 +214,26 @@ def _model_info(path) -> dict:
     return json.loads(info.read_text()) if info.exists() else {}
 
 
-def _run_eye_model(path, images: np.ndarray) -> np.ndarray:
+def _run_eye_model(path, images: np.ndarray, head: np.ndarray | None = None) -> np.ndarray:
     """Run one ONNX eye model on normalised eye images. It reads the window that its .json file records."""
     import cv2
 
     from . import eyenorm
-    from .gazetrain import ANGLE_SCALE
+    from .gazetrain import ANGLE_SCALE, HEAD_SCALE
 
-    window = _model_info(path).get("window")
+    info = _model_info(path)
+    window = info.get("window")
     net = cv2.dnn.readNetFromONNX(str(path))
     x = eyenorm.to_model_input(images, window=tuple(window) if window else None)
+    if info.get("head"):
+        if head is None:
+            raise RuntimeError(f"the model {path.name} needs the head direction")
+        h = np.asarray(head, np.float32) / HEAD_SCALE
     out = np.empty((len(x), 2), np.float32)
     for i in range(0, len(x), 2):  # the model takes the two eyes of one frame
-        net.setInput(np.ascontiguousarray(x[i : i + 2]))
+        net.setInput(np.ascontiguousarray(x[i : i + 2]), "eyes")
+        if info.get("head"):
+            net.setInput(np.ascontiguousarray(h[i : i + 2]), "head")
         out[i : i + 2] = net.forward()
     return out * ANGLE_SCALE
 

@@ -6,7 +6,7 @@ import pytest
 
 from handsfree import eyenorm
 from handsfree.benchmark import CANONICAL_CM, EYES, MEDIAPIPE_VFOV_DEG, DeviceGeometry, EyeImageModel
-from handsfree.gazedata import eye_positions, recording_examples, synth_examples
+from handsfree.gazedata import HEAD_FIT, eye_positions, recording_examples, synth_examples, tracker_head
 from handsfree.recording import EYE_CROP, Recording
 from handsfree.synth import SynthSet
 
@@ -18,6 +18,10 @@ FOCAL = (H / 2) / np.tan(np.radians(44.7) / 2)
 
 def project(p):
     return np.array([W / 2 + FOCAL * p[0] / -p[2], H / 2 - FOCAL * p[1] / -p[2]])
+
+
+HEAD_TARGET = np.array([300.0, 0.0, 0.0])
+"""The synthetic head points at this place, on the image's right side of the camera."""
 
 
 def make_synth(tmp_path) -> SynthSet:
@@ -34,6 +38,7 @@ def make_synth(tmp_path) -> SynthSet:
         "rect": [x0, y0, w, h],
         "camera": {"width": W, "height": H, "focal_px": FOCAL, "vertical_fov_deg": 44.7},
         "crop_centres_px": [project(e).tolist() for e in eyes],
+        "head_forward_cam": (HEAD_TARGET - (eyes[0] + eyes[1]) / 2).tolist(),
         "eyes": [{"tracker_centre_cam_mm": e.tolist(), "sight_cam": ((target - e) / np.linalg.norm(target - e)).tolist()} for e in eyes],
     }
     (tmp_path / "labels-0001.jsonl").write_text(json.dumps(label) + "\n")
@@ -50,6 +55,29 @@ def test_synthetic_examples_are_centred_and_mirrored(tmp_path):
     assert ex.angles[0, 0] > 5 and ex.angles[1, 0] < -5
     assert ex.angles[0, 1] == pytest.approx(ex.angles[1, 1], abs=0.5)
     assert ex.views[1].angles(np.array(make_synth(tmp_path).labels[0]["eyes"][1]["sight_cam"]))[0] == pytest.approx(-ex.angles[1, 0], abs=1e-4)
+    # The head direction is in the same frame as the gaze: positive yaw on the image-left eye, mirrored on the other.
+    assert ex.head.shape == (2, 2) and ex.head[0, 0] > 20 and ex.head[1, 0] < -20
+    assert ex.head[0, 1] == pytest.approx(ex.head[1, 1], abs=1.0)
+
+
+def test_a_set_without_the_head_label_has_no_head_direction(tmp_path):
+    s = make_synth(tmp_path)
+    del s.labels[0]["head_forward_cam"]
+    assert np.isnan(synth_examples(s, [0], np.random.default_rng(0), augment=False).head).all()
+
+
+def test_tracker_head_is_relative_to_the_eye_and_mirrored():
+    eye, other = np.array([-31.0, 0.0, -550.0]), np.array([32.0, 0.0, -550.0])
+    centre = eyenorm.eye_view(np.array([0.0, 0.0, -550.0]), other, FOCAL, (W, H), is_image_left=True)
+    straight = tracker_head(centre, np.eye(4), False)  # the tracker's head points along the camera axis
+    assert straight == pytest.approx([HEAD_FIT[0][0], HEAD_FIT[1][0]], abs=1e-6)
+    turned = np.eye(4)
+    turned[:3, :3] = cv2.Rodrigues(np.array([0.0, np.radians(20.0), 0.0]))[0]  # towards the image's right side
+    assert tracker_head(centre, turned, False)[0] == pytest.approx(HEAD_FIT[0][0] + 20.0 * HEAD_FIT[0][1], abs=1e-3)
+    left = eyenorm.eye_view(eye, other, FOCAL, (W, H), is_image_left=True)
+    right = eyenorm.eye_view(other, eye, FOCAL, (W, H), is_image_left=False)
+    a, b = tracker_head(left, turned, False), tracker_head(right, turned, True)
+    assert a[0] > 15 and b[0] < -15 and a[1] == pytest.approx(b[1], abs=0.5)
 
 
 def test_augmented_copies_differ(tmp_path):
@@ -106,6 +134,7 @@ def test_recording_examples_have_the_target_direction():
     # The user's left is the image's right, so the yaw of the image-left eye is positive there.
     assert ex.angles[2, 0] > ex.angles[0, 0] > ex.angles[4, 0]
     assert ex.angles[2, 1] > ex.angles[0, 1] > ex.angles[4, 1]
+    assert ex.head.shape == (6, 2) and np.isfinite(ex.head).all()
 
 
 def test_a_perfect_model_finds_the_targets_on_the_screen():
@@ -113,7 +142,7 @@ def test_a_perfect_model_finds_the_targets_on_the_screen():
     truth = recording_examples(rec, geom).angles
 
     class Perfect(EyeImageModel):
-        def angles(self, images):
+        def angles(self, images, head=None):
             return truth.copy()
 
     pred = Perfect().predict(rec, geom)

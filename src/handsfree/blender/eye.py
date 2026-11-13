@@ -211,6 +211,11 @@ def iris_material(p: EyeParams, name: str):
     nt.links.new(mix.outputs["Result"], dim.inputs["A"])
     nt.links.new(dim.outputs["Result"], bsdf.inputs["Base Color"])
     bsdf.inputs["Roughness"].default_value = 0.6
+    # No mirror reflection: the iris lies in the eye's fluid, which has nearly the same refractive
+    # index, and the pupil is a hole. With the default reflection the pupil was grey, not black.
+    for key in ("Specular IOR Level", "Specular"):
+        if key in bsdf.inputs:
+            bsdf.inputs[key].default_value = 0.0
     return mat
 
 
@@ -251,7 +256,7 @@ def sclera_material(p: EyeParams, name: str):
         # Ambient occlusion: the part of the surroundings that the lids hide from each point of the eye.
         occlusion = nt.nodes.new("ShaderNodeAmbientOcclusion")
         occlusion.samples = 6
-        occlusion.inputs["Distance"].default_value = 14.0 * MM
+        occlusion.inputs["Distance"].default_value = 8.0 * MM  # the lids, not the nose
         power = nt.nodes.new("ShaderNodeMath")
         power.operation = "POWER"
         power.inputs[1].default_value = p.shade
@@ -294,6 +299,67 @@ def create_eye(p: EyeParams, name: str) -> bpy.types.Object:
     mesh = build_eye_mesh(p, name)
     for mat in (sclera_material(p, name + ".sclera"), iris_material(p, name + ".iris"), cornea_material(p, name + ".cornea")):
         mesh.materials.append(mat)
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.scene.collection.objects.link(obj)
+    return obj
+
+
+SOCKET_LINING_RADIUS = 15.5
+"""Radius of the socket lining, mm in the character's own size. The character's lids lie on a 16.4 mm sphere."""
+SOCKET_LINING_HOLE = 9.8
+"""Radius of the round opening in the lining, in front of the eyeball."""
+
+
+def create_socket_lining(p: EyeParams, name: str) -> bpy.types.Object:
+    """The soft tissue between the lids and the eyeball: a pink shell just behind the lids, with a round opening for the eyeball.
+
+    The character's lids are made for a larger eyeball. With a real-size eyeball, the eye
+    corners are open holes into the head, and they render black. A real eye has tissue there
+    (the conjunctiva, and the caruncle at the nose side). The shell's origin is the centre of
+    the character's own eyeball; its opening points along local -Y, the front of the face.
+    """
+    bm = bmesh.new()
+    first = math.asin(SOCKET_LINING_HOLE / SOCKET_LINING_RADIUS)
+    angles = [first + (math.radians(150.0) - first) * i / 20 for i in range(21)]
+    _revolve(bm, [(SOCKET_LINING_RADIUS * math.sin(a), SOCKET_LINING_RADIUS * math.cos(a)) for a in angles], 48, 0)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    for face in bm.faces:
+        face.smooth = True
+    mesh = bpy.data.meshes.new(name)
+    bm.to_mesh(mesh)
+    bm.free()
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    bsdf, _ = _principled(mat)
+    s = p.sclera_colour
+    base = (s[0] * 0.85, s[1] * 0.58, s[2] * 0.55)  # pink
+    colour = None
+    if p.shade > 0:
+        occlusion = nt.nodes.new("ShaderNodeAmbientOcclusion")
+        occlusion.samples = 6
+        occlusion.inputs["Distance"].default_value = 8.0 * MM
+        occlusion.inputs["Color"].default_value = (*base, 1.0)
+        power = nt.nodes.new("ShaderNodeMath")
+        power.operation = "POWER"
+        power.inputs[1].default_value = p.shade
+        nt.links.new(occlusion.outputs["AO"], power.inputs[0])
+        shaded = nt.nodes.new("ShaderNodeMix")
+        shaded.data_type = "RGBA"
+        shaded.blend_type = "MULTIPLY"
+        shaded.inputs["Factor"].default_value = 1.0
+        shaded.inputs["A"].default_value = (*base, 1.0)
+        nt.links.new(power.outputs[0], shaded.inputs["B"])
+        colour = shaded.outputs["Result"]
+    if colour is None:
+        bsdf.inputs["Base Color"].default_value = (*base, 1.0)
+    else:
+        nt.links.new(colour, bsdf.inputs["Base Color"])
+    bsdf.inputs["Roughness"].default_value = 0.4
+    for key, value in (("Coat Weight", 0.6), ("Coat Roughness", 0.1), ("Subsurface Weight", 0.2)):
+        if key in bsdf.inputs:
+            bsdf.inputs[key].default_value = value
+    mesh.materials.append(mat)
     obj = bpy.data.objects.new(name, mesh)
     bpy.context.scene.collection.objects.link(obj)
     return obj

@@ -132,7 +132,7 @@ def random_person(rng: random.Random) -> S.PersonParams:
         iris_colour=colour,
         sclera_colour=tuple(c * rng.uniform(0.85, 1.0) for c in (0.80, 0.76, 0.72)),
         vein_strength=rng.uniform(0.05, 0.6),
-        shade=rng.uniform(0.9, 3.3),
+        shade=rng.uniform(0.3, 1.7),
     )
     pupil = rng.uniform(1.3, 3.6)
     eyes = tuple(
@@ -150,6 +150,8 @@ def random_person(rng: random.Random) -> S.PersonParams:
         kappa_v_deg=rng.gauss(1.5, 1.0),
         scale=rng.uniform(0.98, 1.16),
         eyeball_offset_mm=(rng.gauss(0.0, 1.0), rng.gauss(0.0, 1.0), rng.gauss(0.0, 1.5)),
+        lash_line=rng.uniform(0.1, 0.8),
+        lower_lashes=rng.uniform(0.1, 0.8),
         glasses=random_glasses(rng) if rng.random() < GLASSES_SHARE else None,
     )
 
@@ -183,10 +185,14 @@ def random_pose(rng: random.Random, setup: dict) -> tuple[S.Pose, dict]:
         head_roll_deg=rng.gauss(0, 5),
         eye_mid_cam_mm=(x, y, z),
         target_cam_mm=target,
-        # Measured with the face tracker: real lids are wider open than the MakeHuman rest
-        # shape (0.31 against 0.24 eye widths) and close less on a down gaze.
-        upper_lid_follow=rng.uniform(0.65, 0.9),
-        lower_lid_follow=rng.uniform(0.3, 0.55),
+        # Real lids are wider open than the MakeHuman rest shape (0.31 against 0.24 eye widths,
+        # measured with the face tracker). On a down gaze the upper lid of a real eye follows the
+        # iris, and the lower lid nearly stays: the iris sinks behind it. Measured with the face
+        # tracker's lid points on 15 real persons (MPIIFaceGaze) and on rendered faces: for each
+        # degree of down gaze the real upper lid moves 0.14 mm and the real lower lid 0.03 mm.
+        # Rendered faces with 0.775 / 0.1 give 0.17 mm and 0.025 mm.
+        upper_lid_follow=rng.uniform(0.5, 0.8),
+        lower_lid_follow=rng.uniform(0.05, 0.3),
         lid_open=rng.gauss(3.5, 4.0) - (rng.uniform(4, 10) if rng.random() < 0.1 else 0),
     )
     return pose, {"screen_xy_mm": [sx, sy]}
@@ -200,7 +206,11 @@ def random_light(rng: random.Random, setup: dict) -> dict:
     scene.world = world
     world.use_nodes = True
     bg = next(n for n in world.node_tree.nodes if n.type == "BACKGROUND")
-    ambient = 10 ** rng.uniform(-1.6, -0.3)
+    # Two kinds of rooms. In a lit room, lamps and windows give most of the light, and the rest of
+    # the room is dim; the cornea and the glasses reflect that dim room. In a dark room, the screen
+    # is the main light: it lights the face from the front and shows large in the glasses.
+    screen_lit = rng.random() < 0.35
+    ambient = 10 ** (rng.uniform(-3.0, -1.6) if screen_lit else rng.uniform(-2.3, -0.9))
     tint = [rng.uniform(0.8, 1.0), rng.uniform(0.85, 1.0), rng.uniform(0.75, 1.0)]
     bg.inputs[0].default_value = (*tint, 1.0)
     # A room is bright above and dark below: ceiling, windows and lamps against the floor and the desk.
@@ -218,11 +228,11 @@ def random_light(rng: random.Random, setup: dict) -> dict:
     for key, value in (("From Min", -0.25), ("From Max", 0.35), ("To Min", ambient * floor), ("To Max", ambient)):
         level.inputs[key].default_value = value
     nt.links.new(level.outputs["Result"], bg.inputs[1])
-    info = {"ambient": ambient, "floor": floor, "lamps": []}
-    for _ in range(rng.choice((0, 1, 1, 2, 3))):
+    info = {"ambient": ambient, "floor": floor, "screen_lit": screen_lit, "lamps": []}
+    for _ in range(rng.choice((0, 0, 0, 1)) if screen_lit else rng.choice((1, 1, 1, 2, 2, 3))):
         data = bpy.data.lights.new("lamp", "AREA")
-        data.size = rng.uniform(0.1, 1.2)
-        data.energy = 10 ** rng.uniform(0.3, 1.8)
+        data.size = rng.uniform(0.2, 2.0)
+        data.energy = 10 ** (rng.uniform(-0.5, 0.8) if screen_lit else rng.uniform(0.8, 2.0))
         data.color = (1.0, rng.uniform(0.75, 1.0), rng.uniform(0.5, 1.0))
         lamp = bpy.data.objects.new("lamp", data)
         scene.collection.objects.link(lamp)
@@ -355,6 +365,8 @@ def main() -> None:
                         "eye_shape": params.eye_shape,
                         "eyeball_offset_mm": params.eyeball_offset_mm,
                         "glasses": vars(params.glasses) if params.glasses else None,
+                        "lash_line": params.lash_line,
+                        "lower_lashes": params.lower_lashes,
                         "eyes": [vars(e) for e in params.eyes],
                     },
                     lids={"upper_follow": pose.upper_lid_follow, "lower_follow": pose.lower_lid_follow, "open": pose.lid_open},

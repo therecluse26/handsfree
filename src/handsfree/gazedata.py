@@ -7,6 +7,10 @@ image in training and in use.
 One example is one eye: a 96 x 64 grey image and the gaze angles (yaw, pitch)
 in the eye's virtual camera. Eyes on the image's right side are mirrored, and
 their yaw changes sign, so the model learns one eye type.
+
+An example also has the head direction in the same virtual camera. The eye image
+alone shows the head direction badly, and the same eye image means another gaze
+when the head is turned. A model can get the head direction as a second input.
 """
 
 from __future__ import annotations
@@ -33,6 +37,12 @@ class Examples:
     views: list[eyenorm.EyeView]
     is_right: np.ndarray
     """N bool: the eye is on the image's right side (it was mirrored)."""
+    head: np.ndarray
+    """N x 2 float32: the head direction as (yaw, pitch) degrees in the virtual camera, yaw mirrored as the gaze.
+
+    (0, 0) is a head that points at the camera. Synthetic examples have the exact direction.
+    Real examples have ``tracker_head``: the face tracker's measurement.
+    """
 
     def model_input(self) -> np.ndarray:
         return eyenorm.to_model_input(self.images)
@@ -42,11 +52,32 @@ def _mirror(image: np.ndarray, angles: np.ndarray, is_right: bool) -> tuple[np.n
     return (image[:, ::-1], angles * [-1.0, 1.0]) if is_right else (image, angles)
 
 
+HEAD_FIT = ((0.05, 1.06, -0.56), (4.94, 1.07, -0.43))
+"""For yaw and for pitch: (constant, x tracker angle, x eye position angle), see ``tracker_head``."""
+HEAD_ERROR_DEG = (3.2, 3.6)
+"""Error of ``tracker_head`` (yaw, pitch; standard deviation). The training adds it to the exact head direction."""
+
+
+def tracker_head(view: eyenorm.EyeView, matrix: np.ndarray, is_right: bool) -> np.ndarray:
+    """The head direction (yaw, pitch degrees in the eye's virtual camera) from the face tracker's transform.
+
+    The tracker's direction is not the direction of the synthetic persons' labels: it has another
+    zero for the pitch, and it changes with the position of the face in the image. The numbers of
+    ``HEAD_FIT`` come from 298 synthetic faces in full camera frames (fields of view 36 to 70
+    degrees), where the exact direction is known. After the fit the two agree to ``HEAD_ERROR_DEG``.
+    """
+    tracker = view.angles(np.asarray(matrix, float)[:3, 2])
+    e = view.eye_mm
+    position = np.degrees([np.arctan2(e[0], -e[2]), np.arctan2(e[1], -e[2])])
+    out = np.array([c + a * t + b * p for (c, a, b), t, p in zip(HEAD_FIT, tracker, position)])
+    return out * [-1.0, 1.0] if is_right else out
+
+
 def synth_examples(s: SynthSet, indices, rng: np.random.Generator, augment: bool = True, copies: int = 1) -> Examples:
     """Examples from a synthetic set. With ``augment``, each copy gets another simulated camera and tracker error."""
     import cv2
 
-    images, angles, group, views, right = [], [], [], [], []
+    images, angles, group, views, right, head = [], [], [], [], [], []
     for i in indices:
         label = s.labels[i]
         cam = label["camera"]
@@ -75,7 +106,9 @@ def synth_examples(s: SynthSet, indices, rng: np.random.Generator, augment: bool
                 group.append(person)
                 views.append(view)
                 right.append(k == 1)
-    return Examples(np.stack(images), np.array(angles, np.float32), np.array(group), views, np.array(right))
+                forward = label.get("head_forward_cam")  # sets from before the head label have none
+                head.append(view.angles(forward) * ([-1.0, 1.0] if k == 1 else [1.0, 1.0]) if forward else (np.nan, np.nan))
+    return Examples(np.stack(images), np.array(angles, np.float32), np.array(group), views, np.array(right), np.array(head, np.float32))
 
 
 def eye_positions(rec: Recording, geom: DeviceGeometry) -> tuple[np.ndarray, float]:
@@ -108,7 +141,7 @@ def recording_examples(rec: Recording, geom: DeviceGeometry, indices=None) -> Ex
     eyes_mm, focal = eye_positions(rec, geom)
     crops = rec.eyes()
     target = geom.to_camera(f["target_xy"] * np.array(geom.screen_mm))
-    images, angles, group, views, right = [], [], [], [], []
+    images, angles, group, views, right, head = [], [], [], [], [], []
     for i in range(len(rec)) if indices is None else indices:
         for k in (0, 1):
             view = eyenorm.eye_view(eyes_mm[i, k], eyes_mm[i, 1 - k], focal, size, is_image_left=(k == 0))
@@ -118,4 +151,5 @@ def recording_examples(rec: Recording, geom: DeviceGeometry, indices=None) -> Ex
             group.append(i)
             views.append(view)
             right.append(k == 1)
-    return Examples(np.stack(images), np.array(angles, np.float32), np.array(group), views, np.array(right))
+            head.append(tracker_head(view, f["matrix"][i], k == 1))
+    return Examples(np.stack(images), np.array(angles, np.float32), np.array(group), views, np.array(right), np.array(head, np.float32))
