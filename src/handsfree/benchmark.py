@@ -158,7 +158,7 @@ class EyeImageModel:
     """The eye-image gaze model (see gazetrain.py). It reads the eye pixels and is trained on synthetic data only."""
 
     name: str = "eye-cnn"
-    description: str = "CNN on normalised eye images, trained on synthetic data"
+    description: str = "CNNs on normalised eye images, trained on synthetic data"
     model: str = ""
     """Path of the ONNX file. Empty means the default path."""
 
@@ -169,19 +169,16 @@ class EyeImageModel:
         return Path(self.model) if self.model else model_path()
 
     def angles(self, images: np.ndarray) -> np.ndarray:
-        """Gaze angles (N x 2 degrees) for normalised eye images (N x 64 x 96 uint8, N even: pairs of eyes)."""
-        import cv2
+        """Gaze angles (N x 2 degrees) for normalised eye images (N x 64 x 96 uint8, N even: pairs of eyes).
 
-        from . import eyenorm
-        from .gazetrain import ANGLE_SCALE
-
-        net = cv2.dnn.readNetFromONNX(str(self.path()))
-        x = eyenorm.to_model_input(images)
-        out = np.empty((len(x), 2), np.float32)
-        for i in range(0, len(x), 2):  # the model takes the two eyes of one frame
-            net.setInput(np.ascontiguousarray(x[i : i + 2]))
-            out[i : i + 2] = net.forward()
-        return out * ANGLE_SCALE
+        A model's .json file can name a second model for the pitch ("pitch_from"). Then the
+        yaw comes from this model and the pitch from the second one.
+        """
+        out = _run_eye_model(self.path(), images)
+        other = _model_info(self.path()).get("pitch_from")
+        if other and (self.path().parent / other).exists():
+            out[:, 1] = _run_eye_model(self.path().parent / other, images)[:, 1]
+        return out
 
     def predict(self, rec: Recording, geom: DeviceGeometry) -> Prediction:
         from .gazedata import recording_examples
@@ -198,6 +195,31 @@ class EyeImageModel:
         hits = np.array(hits).reshape(len(rec), 2, 3)
         origins = np.array(origins).reshape(len(rec), 2, 3)
         return Prediction(geom.to_screen(hits.mean(axis=1)), origins.mean(axis=1))
+
+
+def _model_info(path) -> dict:
+    """The .json file that ``handsfree train`` writes next to a model. Empty when there is none."""
+    import json
+
+    info = path.with_suffix(".json")
+    return json.loads(info.read_text()) if info.exists() else {}
+
+
+def _run_eye_model(path, images: np.ndarray) -> np.ndarray:
+    """Run one ONNX eye model on normalised eye images. It reads the window that its .json file records."""
+    import cv2
+
+    from . import eyenorm
+    from .gazetrain import ANGLE_SCALE
+
+    window = _model_info(path).get("window")
+    net = cv2.dnn.readNetFromONNX(str(path))
+    x = eyenorm.to_model_input(images, window=tuple(window) if window else None)
+    out = np.empty((len(x), 2), np.float32)
+    for i in range(0, len(x), 2):  # the model takes the two eyes of one frame
+        net.setInput(np.ascontiguousarray(x[i : i + 2]))
+        out[i : i + 2] = net.forward()
+    return out * ANGLE_SCALE
 
 
 ESTIMATORS: dict[str, Estimator] = {e.name: e for e in (GeometricEyeModel(), EyeImageModel())}

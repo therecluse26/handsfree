@@ -69,7 +69,10 @@ uv run handsfree preview
 | `handsfree synth setup` | Installs the Blender add-on and downloads the CC0 character assets (about 270 MB). Uses a separate Blender profile. |
 | `handsfree synth generate` | Renders labelled synthetic eye images with Blender. `--people`, `--poses`, `--jobs`, `--seed`, `--name`. |
 | `handsfree synth sheet [--camera]` | Writes one image with many eye crops of a synthetic set, for a visual check. `--camera` applies the camera simulation. |
-| `handsfree train --set NAME` | Trains the eye-image gaze model on a synthetic set and writes it as ONNX. Needs `uv sync --group train` (PyTorch). |
+| `handsfree train --set NAME` | Trains the two eye-image gaze models (one for yaw, one for pitch) on a synthetic set and writes them as ONNX. Needs `uv sync --group train` (PyTorch). |
+| `handsfree reference fetch` | Downloads 3000 portrait photos of real persons (FFHQ, about 3 GB) for measurements. They are never used for training. |
+| `handsfree reference gaze` | Measures the eye-image model on those photos: the persons look into the camera, so the correct gaze is known. |
+| `handsfree reference realism --set NAME` | Trains a classifier to tell real eye images from synthetic ones, for each part of the image. Needs `uv sync --group train`. |
 | `handsfree bench [--seconds N]` | Measures frame rate and latency with no window. |
 | `handsfree fetch-models` | Downloads the face model to `~/.cache/handsfree/models/`. |
 | `handsfree config [--defaults]` | Prints the active (or default) config as TOML. |
@@ -135,12 +138,69 @@ The report gives, for each recording:
   wrong device constant or a wrong model constant.
 - **gain**: predicted movement divided by true movement. 1.00 is correct.
 
-| Estimator | Method | Result on the first 3 recordings |
+| Estimator | Method | Result on 4 recordings of one person |
 |---|---|---|
-| `geometric` | 3D eyeball on the MediaPipe iris landmarks, population averages | 14.7° mean error; gain 0.75 horizontal, 0.39 vertical (camera field of view 44.7° vertical) |
+| `geometric` | 3D eyeball on the MediaPipe iris landmarks, population averages | 14.1° mean error; gain 0.68 horizontal, 0.39 vertical (camera field of view 44.7° vertical) |
+| `eye-cnn` | Two CNNs on normalised eye images, trained on synthetic renders only | 5.5° mean error; gain 0.94 horizontal, 0.62 vertical |
 
 The `geometric` result shows that the MediaPipe iris landmark moves too
-little, mostly vertically. An eye-image model is the next estimator.
+little, mostly vertically.
+
+History of the `eye-cnn` result. Each model is trained on synthetic renders
+only. Recordings 1 to 3 were used to compare the models. Recording 4 was made
+after the comparison, in low light, so it is an independent test:
+
+| Training set | Part of the eye image that the model reads | Recordings 1 to 3 | Recording 4 | Gain horizontal, vertical (1 to 3) |
+|---|---|---|---|---|
+| 5543 renders, no glasses, bright eyes | whole image (48 x 32 mm) | 8.0° | 8.6° | 0.70, 0.42 |
+| the same | window, 32 x 20 mm | 8.8° | 10.5° | 0.90, 0.37 |
+| 4800 renders with glasses and lid shade | whole image | 6.9° | 7.7° | 0.61, 0.65 |
+| the same | window, 32 x 20 mm | 6.7° | 7.8° | 1.01, 0.37 |
+| the same | window, 32 x 32 mm | 6.0° | 7.8° | 0.78, 0.36 |
+| the same | yaw from the window model, pitch from the whole-image model (the current `eye-cnn`) | 5.2° | 6.6° | 1.00, 0.67 |
+
+The window model follows horizontal movement correctly. The whole-image
+model follows vertical movement better. So `eye-cnn` takes the yaw from the
+first and the pitch from the second.
+
+One measurement shows that the eye images hold more information: a model
+tuned on two recordings of one person has 1.9° to 3.8° on that person's
+third recording. So the open problem is to make the model correct for a new
+person, not the camera or the image size.
+
+## Measurements on many real persons
+
+Three recordings of one person cannot show that a model works for everyone.
+`handsfree reference` uses 3000 portrait photos (FFHQ) as a second test. In
+a portrait the person looks into the camera. So the correct gaze is known:
+(0, 0) in the normalised eye view. Each photo gets the camera simulation
+first, so it looks like a webcam frame.
+
+```sh
+uv run handsfree reference fetch
+uv run handsfree reference gaze
+```
+
+Results for the current `eye-cnn`, frontal heads:
+
+- **Constant error for the average person**: yaw -0.3°, pitch -0.5°.
+- **Difference from person to person**: 7.6° in yaw, 5.4° in pitch (half of
+  the middle 68%). This includes the persons who do not look into the camera.
+  The whole-image model has 6.6° in yaw here, so the window model is better
+  at movement and worse at the constant error.
+- **Each eye alone** is read about 7° towards the nose (3° with the
+  whole-image model). The two eyes cancel this in the mean.
+- **Head turn**: the yaw difference grows to 14.2° at 10° to 25° of head turn.
+- **Glasses**: persons with glasses are read 4.1° lower than persons without.
+
+These measurements found one cause of error in the synthetic images: the
+eye opening was too bright against the cheek (0.60 of the cheek brightness;
+0.36 to 0.45 in real images). The lid shade (see below) corrects it to 0.45.
+
+The photos are licensed CC BY-NC-SA 4.0 by NVIDIA, and each photo has its
+own licence. handsfree uses them to measure only. No model is trained on
+them, and they are not in this repository. The glasses label of each photo
+comes from the FFHQ features data set (DCGM/ffhq-features-dataset).
 
 ## Synthetic training data
 
@@ -162,6 +222,13 @@ uv run handsfree synth sheet --name trial --camera
 - **Eyes** are anatomical models (`handsfree/blender/eye.py`): a 12 mm
   eyeball, a refracting cornea, a procedural iris, and the angle between the
   optical axis and the line of sight. Size, colour and pupil are random.
+- **Lid shade**: the lids, lashes and brow shade a real eye. The eye
+  material darkens where the lids hide the surroundings, and the room light
+  is bright above and dark below.
+- **Glasses** (`handsfree/blender/glasses.py`): 45% of the persons wear
+  glasses. The lenses are real lens shapes with a random power, so they bend
+  the light, change the size of the eye and reflect the screen and the lamps.
+  Frame shape, colour and position are random.
 - **Each image** has a random camera field of view (36° to 70°), distance
   (350 to 900 mm), screen size, head pose, gaze target, lid position and
   light. Head size, eye shape and the eyeball position in its socket are
@@ -194,8 +261,14 @@ never used to fit it. `handsfree benchmark` tests it on them as `eye-cnn`.
    shows the eye at 2 pixels per millimetre (96 x 64 pixels). The warp uses the
    camera's focal length and the eye's distance. So the model sees the same
    kind of image for every camera, distance and position in the frame.
-2. **Model** (`gazetrain.py`). The input is one grey eye image with zero mean
-   and unit variance. The output is the gaze direction as yaw and pitch in the
+2. **Model** (`gazetrain.py`). In training, each image moves and changes
+   size at random. Without this the model reads the iris position in the
+   image frame, and each millimetre of face tracker offset gives about 3° of
+   error. The input is one grey eye image with zero mean
+   and unit variance. A model can read the whole image or only a window
+   around the eye (`eyenorm.WINDOW`); its `.json` file records the window.
+   `handsfree train` trains two models: one with the window, which gives the
+   yaw, and one with the whole image, which gives the pitch. The output is the gaze direction as yaw and pitch in the
    virtual camera. Right eyes are mirrored, so one model serves both eyes.
 3. **Use** (`benchmark.py`, `EyeImageModel`). The ONNX file runs in OpenCV.
    Each eye's direction is turned back into camera space and meets the screen
@@ -203,7 +276,7 @@ never used to fit it. `handsfree benchmark` tests it on them as `eye-cnn`.
 
 ```sh
 uv sync --group train
-uv run handsfree synth generate --name train1 --people 125 --poses 8 --jobs 4
+uv run handsfree synth generate --name train1 --people 200 --poses 6 --jobs 4
 uv run handsfree train --set train1
 uv run handsfree benchmark
 ```

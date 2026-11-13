@@ -29,6 +29,14 @@ SIZE = (96, 64)
 PX_PER_MM = 2.0
 """Scale of the normalised eye image. The image covers 48 x 32 mm."""
 _DISTANCE = 600.0  # of the virtual camera, mm. Only its ratio to the focal length matters.
+WINDOW = (16, 12, 80, 52)
+"""(x0, y0, x1, y1): the part of the normalised image that the model reads, 32 x 20 mm around the eye.
+
+The rest (eyebrow, nose bridge, temple) is set to zero. A classifier separates real and
+synthetic images easily in those outer parts, and hardly in the eye itself. So the outer
+parts carry the difference between synthetic and real faces, and little gaze information.
+A model can also read the whole image; each model's .json file records its window.
+"""
 
 _FLIP = np.diag([1.0, -1.0, -1.0])  # handsfree camera space <-> image space (x right, y down, z forwards)
 
@@ -101,15 +109,20 @@ def backproject(pixel: tuple[float, float], depth_mm: float, focal_px: float, im
     return np.array([x, y, -depth_mm])
 
 
-def to_model_input(images: np.ndarray, flip: np.ndarray | None = None) -> np.ndarray:
+def to_model_input(images: np.ndarray, flip: np.ndarray | None = None, window: tuple[int, int, int, int] | None = WINDOW) -> np.ndarray:
     """Grey normalised images (N x H x W uint8) to the model input (N x 1 x H x W float32).
 
-    Each image gets zero mean and unit variance, so exposure and contrast do not matter.
+    Only the ``window`` around the eye is kept. It gets zero mean and unit variance, so exposure
+    and contrast do not matter. ``window`` None keeps the whole image.
     ``flip`` marks the images to mirror: the model sees every eye as an image-left eye.
     """
     x = images.astype(np.float32)
     if flip is not None:
         x = np.where(np.asarray(flip, bool)[:, None, None], x[:, :, ::-1], x)
-    mean = x.mean(axis=(1, 2), keepdims=True)
-    std = x.std(axis=(1, 2), keepdims=True)
-    return ((x - mean) / np.maximum(std, 1.0))[:, None]
+    x0, y0, x1, y1 = window or (0, 0, SIZE[0], SIZE[1])
+    inside = x[:, y0:y1, x0:x1]
+    mean = inside.mean(axis=(1, 2), keepdims=True)
+    std = inside.std(axis=(1, 2), keepdims=True)
+    out = np.zeros_like(x)
+    out[:, y0:y1, x0:x1] = (inside - mean) / np.maximum(std, 1.0)
+    return out[:, None]

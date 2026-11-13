@@ -63,5 +63,7 @@ def test_image_and_model_input():
     crop = view.image(frame[y0 : y0 + 128, x0 : x0 + 192], origin=(x0, y0))
     assert np.abs(crop.astype(int) - whole).mean() < 1.0  # a crop gives the same image as the full frame
     x = eyenorm.to_model_input(np.stack([whole, whole]), flip=[False, True])
-    assert x.shape == (2, 1, 64, 96) and abs(float(x[0].mean())) < 1e-4
+    x0, y0, x1, y1 = eyenorm.WINDOW
+    assert x.shape == (2, 1, 64, 96) and abs(float(x[0, 0, y0:y1, x0:x1].mean())) < 1e-4
+    assert not x[0, 0, :y0].any() and not x[0, 0, :, x1:].any()  # outside the window is zero
     assert np.allclose(x[1, 0], x[0, 0, :, ::-1])

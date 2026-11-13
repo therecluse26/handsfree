@@ -35,11 +35,8 @@ def require_face_landmarker(configured: str = "") -> Path:
     return p
 
 
-def fetch_face_landmarker(force: bool = False) -> Path:
-    """Download the face model to the cache and verify its SHA-256."""
-    dest = cache_dir() / "face_landmarker.task"
-    if dest.exists() and not force and _sha256(dest.read_bytes()) == FACE_LANDMARKER_SHA256:
-        return dest
+def ssl_context() -> ssl.SSLContext:
+    """A TLS context that verifies certificates, also where Python does not find the system CA bundle."""
     ctx = ssl.create_default_context()
     if not ctx.cert_store_stats()["x509_ca"]:
         # Standalone Python builds do not always find the system CA bundle.
@@ -47,7 +44,15 @@ def fetch_face_landmarker(force: bool = False) -> Path:
             if os.path.exists(ca):
                 ctx.load_verify_locations(cafile=ca)
                 break
-    with urllib.request.urlopen(FACE_LANDMARKER_URL, context=ctx, timeout=60) as r:
+    return ctx
+
+
+def fetch_face_landmarker(force: bool = False) -> Path:
+    """Download the face model to the cache and verify its SHA-256."""
+    dest = cache_dir() / "face_landmarker.task"
+    if dest.exists() and not force and _sha256(dest.read_bytes()) == FACE_LANDMARKER_SHA256:
+        return dest
+    with urllib.request.urlopen(FACE_LANDMARKER_URL, context=ssl_context(), timeout=60) as r:
         data = r.read()
     digest = _sha256(data)
     if digest != FACE_LANDMARKER_SHA256:

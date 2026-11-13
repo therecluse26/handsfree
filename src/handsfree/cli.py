@@ -27,7 +27,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("evaluate", help="compare all models on the recorded sessions (no camera)")
     p = sub.add_parser("benchmark", help="score gaze estimators on the recordings, with no calibration (no camera)")
     p.add_argument("estimators", nargs="*", help="estimator names (default: all)")
-    p = sub.add_parser("train", help="train the eye-image gaze model on a synthetic set (needs: uv sync --group train)")
+    p = sub.add_parser("train", help="train the two eye-image gaze models on a synthetic set (needs: uv sync --group train)")
     p.add_argument("--set", default="default", help="name of the synthetic set; several names with commas")
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--copies", type=int, default=3, help="simulated-camera versions of each render")
@@ -45,6 +45,13 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--name", default="default")
     g.add_argument("--count", type=int, default=24)
     g.add_argument("--camera", action="store_true", help="apply the camera simulation")
+    p = sub.add_parser("reference", help="measurements on photos of many real persons (FFHQ, about 3 GB; never used for training)")
+    rsub = p.add_subparsers(dest="reference_command", required=True)
+    rsub.add_parser("fetch", help="download the reference photos")
+    g = rsub.add_parser("gaze", help="constant gaze error of the eye-image model on persons who look into the camera")
+    g.add_argument("--model", default="", help="ONNX file (default: the current model)")
+    g = rsub.add_parser("realism", help="where a classifier can tell synthetic eyes from real ones (needs: uv sync --group train)")
+    g.add_argument("--set", default="default", help="name of the synthetic set; several names with commas")
     p = sub.add_parser("bench", help="measure frame rate and latency without a window")
     p.add_argument("--seconds", type=float, default=5.0)
     p = sub.add_parser("config", help="print the active config as TOML")
@@ -95,6 +102,10 @@ def main(argv: list[str] | None = None) -> int:
             from .synth import run as run_synth
 
             return run_synth(args)
+        if args.command == "reference":
+            from .reference import run as run_reference
+
+            return run_reference(args)
         if args.command == "benchmark":
             from .benchmark import run_benchmark
 
